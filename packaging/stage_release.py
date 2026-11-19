@@ -96,12 +96,16 @@ def stage_clean_release(root_dir: Path = None, exe_override: Path = None) -> Pat
             zf.write(root / src_rel, arcname=src_rel)
     expected_files.add(src_zip_name)
 
-    pkgs = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True)
+    if sys.prefix != sys.base_prefix:
+        pkgs = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True)
+    else:
+        lock_lines = (root / "packaging" / "requirements-build.lock.txt").read_text(encoding="utf-8").splitlines()
+        pkgs = "\n".join(ln for ln in lock_lines if ln.strip() and not ln.lstrip().startswith("#")) + "\n"
     build_info = (
         f"{APP_NAME} v{APP_VERSION}\n"
         f"Python: {sys.version}\n"
         f"Platform: {platform.platform()}\n\n"
-        f"Installed Build Environment Packages:\n{pkgs}"
+        f"Locked Build Environment Packages:\n{pkgs}"
     )
     (rel_dir / "BUILD_INFO.txt").write_text(build_info, encoding="utf-8")
     expected_files.add("BUILD_INFO.txt")
