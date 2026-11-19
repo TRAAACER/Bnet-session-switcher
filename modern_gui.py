@@ -1,39 +1,66 @@
 """
-暴雪战网账号切换器 - 现代PyQt5界面（无边框版）
+bnet-session-switcher - 现代化 PyQt5 无边框图形界面
+支持暴雪战网国服（网易通行证）与国际服多账号隔离保存与快速切换
 """
-import sys
-import os
 import ctypes
+import json
+import os
+import subprocess
+import sys
 from datetime import datetime
+
+from PyQt5.QtCore import QPoint, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QScrollArea, QFrame, QMessageBox,
-    QInputDialog, QGraphicsDropShadowEffect, QSizePolicy, QDialog,
-    QLineEdit, QCheckBox
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QPoint
-from PyQt5.QtGui import QFont, QColor, QIcon, QPalette, QPixmap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from isolated_switcher import IsolatedSwitcher, is_admin
+from config import (
+    APP_DIR,
+    APP_NAME,
+    APP_TITLE,
+    APP_VERSION,
+    LOGS_DIR,
+    SETTINGS_FILE,
+    SingleInstanceLock,
+)
+from isolated_switcher import IsolatedSwitcher, find_battlenet_exe, is_admin
 
 
-# 颜色主题
 COLORS = {
-    'bg': '#f5f7fa',
-    'sidebar': '#ffffff',
-    'card': '#e8f4f8',
-    'card_hover': '#d4eef5',
-    'primary': '#00b4d8',
-    'primary_dark': '#0096c7',
-    'secondary': '#0ea5e9',
-    'success': '#48bb78',
-    'warning': '#ed8936',
-    'danger': '#fc8181',
-    'text': '#2d3748',
-    'text_light': '#718096',
-    'white': '#ffffff',
-    'border': '#e2e8f0'
+    "bg": "#f5f7fa",
+    "sidebar": "#ffffff",
+    "card": "#e8f4f8",
+    "card_hover": "#d4eef5",
+    "card_active": "#dff5fc",
+    "primary": "#00b4d8",
+    "primary_dark": "#0096c7",
+    "secondary": "#0ea5e9",
+    "global": "#9333ea",
+    "global_dark": "#7e22ce",
+    "success": "#38a169",
+    "warning": "#dd6b20",
+    "danger": "#e53e3e",
+    "text": "#2d3748",
+    "text_light": "#718096",
+    "white": "#ffffff",
+    "border": "#e2e8f0",
 }
 
 STYLESHEET = f"""
@@ -50,27 +77,13 @@ QWidget#sidebar {{
 
 QLabel#title {{
     color: {COLORS['text']};
-    font-size: 20px;
+    font-size: 19px;
     font-weight: bold;
 }}
 
 QLabel#subtitle {{
     color: {COLORS['text_light']};
-    font-size: 12px;
-}}
-
-QPushButton#primaryBtn {{
-    background-color: {COLORS['primary']};
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 12px 20px;
-    font-size: 13px;
-    font-weight: bold;
-}}
-
-QPushButton#primaryBtn:hover {{
-    background-color: {COLORS['primary_dark']};
+    font-size: 11px;
 }}
 
 QPushButton#secondaryBtn {{
@@ -78,25 +91,12 @@ QPushButton#secondaryBtn {{
     color: {COLORS['text']};
     border: 1px solid {COLORS['border']};
     border-radius: 8px;
-    padding: 10px 16px;
+    padding: 8px 16px;
     font-size: 13px;
 }}
 
 QPushButton#secondaryBtn:hover {{
     background-color: {COLORS['bg']};
-}}
-
-QPushButton#dangerBtn {{
-    background-color: {COLORS['danger']};
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 10px 16px;
-    font-size: 13px;
-}}
-
-QPushButton#dangerBtn:hover {{
-    background-color: #f56565;
 }}
 
 QScrollArea {{
@@ -110,353 +110,337 @@ QWidget#scrollContent {{
 """
 
 
-class ModernDialog(QFrame):
-    """现代化的对话框"""
-    
-    def __init__(self, parent, title, message, dialog_type="info", buttons=None):
-        super().__init__(parent, Qt.Window | Qt.FramelessWindowHint)
+class TaskThread(QThread):
+    """通用后台任务线程，严格以 QThread.finished 作为生命周期释放边界"""
+
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.outcome_ok = False
+        self.outcome_value = None
+        self.outcome_error = ""
+
+    def run(self):
+        try:
+            self.outcome_value = self.fn(*self.args, **self.kwargs)
+            self.outcome_ok = True
+        except Exception as e:
+            self.outcome_ok = False
+            self.outcome_error = str(e)
+
+
+class BaseFramelessDialog(QDialog):
+    """带圆角阴影、自适应高度、支持拖拽及回车/Esc 快捷键的无边框对话框基类"""
+
+    def __init__(self, parent=None, width: int = 480):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowModality(Qt.ApplicationModal)
-        self.result = False
-        self.setup_ui(title, message, dialog_type, buttons or ["确定"])
-        
-    def setup_ui(self, title, message, dialog_type, buttons):
-        self.setFixedSize(480, 260)
-        
-        # 主容器
-        container = QFrame(self)
-        container.setGeometry(10, 10, 460, 240)
-        container.setStyleSheet(f"""
-            QFrame {{
+        self.setModal(True)
+        self._drag_pos = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)
+
+        self.container = QFrame(self)
+        self.container.setObjectName("dialogContainer")
+        self.container.setFixedWidth(width - 28)
+        self.container.setStyleSheet(
+            f"""
+            QFrame#dialogContainer {{
                 background-color: white;
-                border-radius: 15px;
+                border-radius: 14px;
+                border: 1px solid {COLORS['border']};
             }}
-        """)
-        
-        # 阴影
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 50))
+            """
+        )
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(22)
+        shadow.setColor(QColor(0, 0, 0, 55))
         shadow.setOffset(0, 5)
-        container.setGraphicsEffect(shadow)
-        
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(25, 25, 25, 25)
-        layout.setSpacing(15)
-        
-        # 图标和标题
+        self.container.setGraphicsEffect(shadow)
+
+        outer.addWidget(self.container)
+
+        self.body_layout = QVBoxLayout(self.container)
+        self.body_layout.setContentsMargins(26, 22, 26, 22)
+        self.body_layout.setSpacing(14)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.adjustSize()
+        parent_win = self.parent().window() if self.parent() else None
+        if parent_win:
+            center = parent_win.frameGeometry().center()
+            self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, _event):
+        self._drag_pos = None
+
+
+class ModernDialog(BaseFramelessDialog):
+    """自适应多行文本高度的提示/确认对话框"""
+
+    def __init__(self, parent, title: str, message: str, dialog_type: str = "info", buttons=None):
+        super().__init__(parent, width=500)
+        self._setup_content(title, message, dialog_type, buttons or ["确定"])
+
+    def _setup_content(self, title: str, message: str, dialog_type: str, buttons: list):
         header = QHBoxLayout()
-        
-        icon_colors = {"info": COLORS['primary'], "success": COLORS['success'], 
-                      "warning": COLORS['warning'], "error": COLORS['danger']}
-        icon_texts = {"info": "ℹ", "success": "✓", "warning": "⚠", "error": "✗"}
-        
+        header.setSpacing(12)
+
+        icon_colors = {
+            "info": COLORS["primary"],
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }
+        icon_texts = {"info": "ℹ", "success": "✓", "warning": "⚠", "error": "✕"}
+
         icon = QLabel(icon_texts.get(dialog_type, "ℹ"))
-        icon.setFixedSize(40, 40)
+        icon.setFixedSize(38, 38)
         icon.setAlignment(Qt.AlignCenter)
-        icon.setStyleSheet(f"""
+        icon.setStyleSheet(
+            f"""
             background-color: {icon_colors.get(dialog_type, COLORS['primary'])};
             color: white;
-            border-radius: 20px;
-            font-size: 20px;
+            border-radius: 19px;
+            font-size: 18px;
             font-weight: bold;
-        """)
+            """
+        )
         header.addWidget(icon)
-        
+
         title_label = QLabel(title)
-        title_label.setFont(QFont("微软雅黑", 14, QFont.Bold))
+        title_label.setFont(QFont("微软雅黑", 13, QFont.Bold))
         title_label.setStyleSheet(f"color: {COLORS['text']};")
-        header.addWidget(title_label)
-        header.addStretch()
-        
-        layout.addLayout(header)
-        
-        # 消息内容
+        header.addWidget(title_label, 1)
+        self.body_layout.addLayout(header)
+
         msg_label = QLabel(message)
-        msg_label.setFont(QFont("微软雅黑", 11))
-        msg_label.setStyleSheet(f"color: {COLORS['text_light']};")
+        msg_label.setFont(QFont("微软雅黑", 10))
+        msg_label.setStyleSheet(f"color: {COLORS['text_light']}; line-height: 1.5;")
         msg_label.setWordWrap(True)
-        layout.addWidget(msg_label)
-        
-        layout.addStretch()
-        
-        # 按钮
+        msg_label.setMinimumHeight(44)
+        self.body_layout.addWidget(msg_label)
+
+        self.body_layout.addSpacing(4)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
-        for i, btn_text in enumerate(buttons):
-            btn = QPushButton(btn_text)
-            if i == 0:
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {COLORS['primary']};
-                        color: white;
-                        border: none;
-                        border-radius: 8px;
-                        padding: 10px 25px;
-                        font-size: 13px;
-                        font-weight: bold;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {COLORS['primary_dark']};
-                    }}
-                """)
-                btn.clicked.connect(self.accept)
-            else:
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: white;
-                        color: {COLORS['text']};
-                        border: 1px solid {COLORS['border']};
-                        border-radius: 8px;
-                        padding: 10px 25px;
-                        font-size: 13px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {COLORS['bg']};
-                    }}
-                """)
-                btn.clicked.connect(self.reject)
-            btn_layout.addWidget(btn)
-        
-        layout.addLayout(btn_layout)
-        
-        # 居中显示
-        if self.parent():
-            parent_geo = self.parent().geometry()
-            self.move(parent_geo.center().x() - 240, parent_geo.center().y() - 130)
-    
-    def accept(self):
-        self.result = True
-        self.close()
-    
-    def reject(self):
-        self.result = False
-        self.close()
-    
-    @staticmethod
-    def show_info(parent, title, message):
-        dialog = ModernDialog(parent, title, message, "info")
-        dialog.exec_()
-    
-    @staticmethod
-    def show_success(parent, title, message):
-        dialog = ModernDialog(parent, title, message, "success")
-        dialog.exec_()
-    
-    @staticmethod
-    def show_error(parent, title, message):
-        dialog = ModernDialog(parent, title, message, "error")
-        dialog.exec_()
-    
-    @staticmethod
-    def show_question(parent, title, message):
-        dialog = ModernDialog(parent, title, message, "info", ["确定", "取消"])
-        dialog.exec_()
-        return dialog.result
-    
-    def exec_(self):
-        self.show()
-        # 创建事件循环
-        from PyQt5.QtCore import QEventLoop
-        self._loop = QEventLoop()
-        self._loop.exec_()
-    
-    def closeEvent(self, event):
-        if hasattr(self, '_loop') and self._loop.isRunning():
-            self._loop.quit()
-        event.accept()
 
+        if len(buttons) == 2:
+            cancel_btn = QPushButton(buttons[1])
+            cancel_btn.setCursor(Qt.PointingHandCursor)
+            cancel_btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: white;
+                    color: {COLORS['text']};
+                    border: 1px solid {COLORS['border']};
+                    border-radius: 8px;
+                    padding: 9px 24px;
+                    font-size: 13px;
+                }}
+                QPushButton:hover {{
+                    background-color: {COLORS['bg']};
+                }}
+                """
+            )
+            cancel_btn.clicked.connect(self.reject)
+            btn_layout.addWidget(cancel_btn)
 
-class ModernInputDialog(QFrame):
-    """现代化的输入对话框"""
-    
-    def __init__(self, parent, title, message, default_text=""):
-        super().__init__(parent, Qt.Window | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowModality(Qt.ApplicationModal)
-        self.result = None
-        self.setup_ui(title, message, default_text)
-        
-    def setup_ui(self, title, message, default_text):
-        self.setFixedSize(450, 280)
-        
-        # 主容器
-        container = QFrame(self)
-        container.setGeometry(10, 10, 430, 260)
-        container.setStyleSheet(f"""
-            QFrame {{
-                background-color: white;
-                border-radius: 15px;
+        ok_btn = QPushButton(buttons[0])
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setDefault(True)
+        ok_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {COLORS['primary']};
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 9px 26px;
+                font-size: 13px;
+                font-weight: bold;
             }}
-        """)
-        
-        # 阴影
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 50))
-        shadow.setOffset(0, 5)
-        container.setGraphicsEffect(shadow)
-        
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(25, 25, 25, 25)
-        layout.setSpacing(15)
-        
-        # 标题
+            QPushButton:hover {{
+                background-color: {COLORS['primary_dark']};
+            }}
+            """
+        )
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+
+        self.body_layout.addLayout(btn_layout)
+
+    @staticmethod
+    def show_info(parent, title: str, message: str):
+        ModernDialog(parent, title, message, "info").exec_()
+
+    @staticmethod
+    def show_success(parent, title: str, message: str):
+        ModernDialog(parent, title, message, "success").exec_()
+
+    @staticmethod
+    def show_warning(parent, title: str, message: str):
+        ModernDialog(parent, title, message, "warning").exec_()
+
+    @staticmethod
+    def show_error(parent, title: str, message: str):
+        ModernDialog(parent, title, message, "error").exec_()
+
+    @staticmethod
+    def show_question(parent, title: str, message: str) -> bool:
+        return ModernDialog(parent, title, message, "info", ["确定", "取消"]).exec_() == QDialog.Accepted
+
+
+class ModernInputDialog(BaseFramelessDialog):
+    """文本输入对话框（支持回车确认与空白校验）"""
+
+    def __init__(self, parent, title: str, message: str, default_text: str = ""):
+        super().__init__(parent, width=460)
+        self.result_text = ""
+        self._setup_content(title, message, default_text)
+
+    def _setup_content(self, title: str, message: str, default_text: str):
         title_label = QLabel(title)
-        title_label.setFont(QFont("微软雅黑", 16, QFont.Bold))
+        title_label.setFont(QFont("微软雅黑", 14, QFont.Bold))
         title_label.setStyleSheet(f"color: {COLORS['primary']};")
-        layout.addWidget(title_label)
-        
-        # 消息内容
+        self.body_layout.addWidget(title_label)
+
         msg_label = QLabel(message)
         msg_label.setFont(QFont("微软雅黑", 10))
         msg_label.setStyleSheet(f"color: {COLORS['text_light']};")
         msg_label.setWordWrap(True)
-        layout.addWidget(msg_label)
-        
-        # 输入框
-        from PyQt5.QtWidgets import QLineEdit
+        self.body_layout.addWidget(msg_label)
+
         self.input_field = QLineEdit()
         self.input_field.setText(default_text)
-        self.input_field.setFont(QFont("微软雅黑", 12))
-        self.input_field.setStyleSheet(f"""
+        self.input_field.setFont(QFont("微软雅黑", 11))
+        self.input_field.setStyleSheet(
+            f"""
             QLineEdit {{
                 border: 2px solid {COLORS['border']};
                 border-radius: 8px;
-                padding: 12px 15px;
+                padding: 10px 14px;
                 background-color: {COLORS['bg']};
                 color: {COLORS['text']};
             }}
             QLineEdit:focus {{
                 border-color: {COLORS['primary']};
             }}
-        """)
-        layout.addWidget(self.input_field)
-        
-        layout.addStretch()
-        
-        # 按钮
+            """
+        )
+        self.input_field.returnPressed.connect(self._on_confirm)
+        self.body_layout.addWidget(self.input_field)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
+
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(f"""
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: white;
                 color: {COLORS['text']};
                 border: 1px solid {COLORS['border']};
                 border-radius: 8px;
-                padding: 10px 30px;
+                padding: 9px 24px;
                 font-size: 13px;
             }}
             QPushButton:hover {{
                 background-color: {COLORS['bg']};
             }}
-        """)
+            """
+        )
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
-        
+
         ok_btn = QPushButton("确定")
-        ok_btn.setStyleSheet(f"""
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setDefault(True)
+        ok_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {COLORS['primary']};
                 color: white;
                 border: none;
                 border-radius: 8px;
-                padding: 10px 30px;
+                padding: 9px 26px;
                 font-size: 13px;
                 font-weight: bold;
             }}
             QPushButton:hover {{
                 background-color: {COLORS['primary_dark']};
             }}
-        """)
-        ok_btn.clicked.connect(self.accept)
+            """
+        )
+        ok_btn.clicked.connect(self._on_confirm)
         btn_layout.addWidget(ok_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        # 居中显示
-        if self.parent():
-            parent_geo = self.parent().geometry()
-            self.move(parent_geo.center().x() - 225, parent_geo.center().y() - 140)
-        
-        # 聚焦输入框
+
+        self.body_layout.addLayout(btn_layout)
         self.input_field.setFocus()
         self.input_field.selectAll()
-    
-    def accept(self):
-        self.result = self.input_field.text()
-        self.close()
-    
-    def reject(self):
-        self.result = None
-        self.close()
-    
-    def exec_(self):
-        self.show()
-        from PyQt5.QtCore import QEventLoop
-        self._loop = QEventLoop()
-        self._loop.exec_()
-        return QDialog.Accepted if self.result is not None else QDialog.Rejected
-    
-    def closeEvent(self, event):
-        if hasattr(self, '_loop') and self._loop.isRunning():
-            self._loop.quit()
-        event.accept()
-    
+
+    def _on_confirm(self):
+        val = self.input_field.text().strip()
+        if not val:
+            self.input_field.setFocus()
+            return
+        self.result_text = val
+        self.accept()
+
     @staticmethod
-    def get_text(parent, title, message, default_text=""):
+    def get_text(parent, title: str, message: str, default_text: str = ""):
         dialog = ModernInputDialog(parent, title, message, default_text)
-        result = dialog.exec_()
-        return dialog.result if result == QDialog.Accepted else "", result == QDialog.Accepted
+        ok = dialog.exec_() == QDialog.Accepted
+        return dialog.result_text if ok else "", ok
 
 
-class SaveAccountDialog(QDialog):
-    """保存账号对话框，带国际服勾选框"""
-    
-    def __init__(self, parent, email, default_name):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+class SaveAccountDialog(BaseFramelessDialog):
+    """保存账号对话框（统一支持国服与国际服主题样式）"""
+
+    def __init__(self, parent, email: str, default_name: str, is_global: bool = False):
+        super().__init__(parent, width=460)
         self.result_nickname = ""
-        self.is_global = False
-        self.setup_ui(email, default_name)
-    
-    def setup_ui(self, email, default_name):
-        self.setFixedSize(450, 280)
-        
-        container = QFrame(self)
-        container.setGeometry(0, 0, 450, 280)
-        container.setStyleSheet(f"""
-            QFrame {{
-                background-color: white;
-                border-radius: 15px;
-                border: 1px solid {COLORS['border']};
-            }}
-        """)
-        
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(30, 25, 30, 25)
-        layout.setSpacing(15)
-        
-        # 标题
-        title = QLabel("🎮 保存账号")
+        self.is_global = is_global
+        self._setup_content(email, default_name)
+
+    def _setup_content(self, email: str, default_name: str):
+        accent = COLORS["global"] if self.is_global else COLORS["primary"]
+        accent_dark = COLORS["global_dark"] if self.is_global else COLORS["primary_dark"]
+        header_text = "🌐 保存国际服账号" if self.is_global else "🎮 保存国服账号"
+
+        title = QLabel(header_text)
         title.setFont(QFont("微软雅黑", 14, QFont.Bold))
-        title.setStyleSheet(f"color: {COLORS['text']};")
-        layout.addWidget(title)
-        
-        # 邮箱信息
-        email_label = QLabel(f"邮箱/手机: {email}")
+        title.setStyleSheet(f"color: {accent if self.is_global else COLORS['text']};")
+        self.body_layout.addWidget(title)
+
+        account_display = email if email else "未自动识别记忆账号名（保存后仍可正常隔离切换）"
+        email_label = QLabel(f"识别标识: {account_display}")
         email_label.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 12px;")
-        layout.addWidget(email_label)
-        
-        # 昵称输入
+        email_label.setWordWrap(True)
+        self.body_layout.addWidget(email_label)
+
         self.nickname_input = QLineEdit()
         self.nickname_input.setText(default_name)
-        self.nickname_input.setPlaceholderText("请输入账号昵称")
-        self.nickname_input.setStyleSheet(f"""
+        self.nickname_input.setPlaceholderText("请输入便于区分的账号备注昵称")
+        self.nickname_input.setStyleSheet(
+            f"""
             QLineEdit {{
                 border: 2px solid {COLORS['border']};
                 border-radius: 8px;
@@ -466,227 +450,110 @@ class SaveAccountDialog(QDialog):
                 font-size: 13px;
             }}
             QLineEdit:focus {{
-                border-color: {COLORS['primary']};
+                border-color: {accent};
             }}
-        """)
-        layout.addWidget(self.nickname_input)
-        
-        layout.addStretch()
-        
-        # 按钮
+            """
+        )
+        self.nickname_input.returnPressed.connect(self._on_confirm)
+        self.body_layout.addWidget(self.nickname_input)
+
+        hint_text = (
+            "🌐 此账号将标记为国际服（启动参数使用设置中的国际服大区）"
+            if self.is_global
+            else "🇨🇳 此账号将标记为国服（切走前自动回写最新滚动凭证）"
+        )
+        hint = QLabel(hint_text)
+        hint.setStyleSheet(f"color: {accent}; font-size: 11px;")
+        self.body_layout.addWidget(hint)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
+
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(f"""
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: white;
                 color: {COLORS['text']};
                 border: 1px solid {COLORS['border']};
                 border-radius: 8px;
-                padding: 10px 30px;
+                padding: 9px 26px;
                 font-size: 13px;
             }}
             QPushButton:hover {{
                 background-color: {COLORS['bg']};
             }}
-        """)
+            """
+        )
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
-        
+
         ok_btn = QPushButton("确定")
-        ok_btn.setStyleSheet(f"""
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setDefault(True)
+        ok_btn.setStyleSheet(
+            f"""
             QPushButton {{
-                background-color: {COLORS['primary']};
+                background-color: {accent};
                 color: white;
                 border: none;
                 border-radius: 8px;
-                padding: 10px 30px;
+                padding: 9px 26px;
                 font-size: 13px;
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: {COLORS['primary_dark']};
+                background-color: {accent_dark};
             }}
-        """)
-        ok_btn.clicked.connect(self.accept)
+            """
+        )
+        ok_btn.clicked.connect(self._on_confirm)
         btn_layout.addWidget(ok_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        if self.parent():
-            parent_geo = self.parent().geometry()
-            self.move(parent_geo.center().x() - 225, parent_geo.center().y() - 140)
-        
+
+        self.body_layout.addLayout(btn_layout)
         self.nickname_input.setFocus()
         self.nickname_input.selectAll()
-    
-    def accept(self):
-        self.result_nickname = self.nickname_input.text()
-        super().accept()
+
+    def _on_confirm(self):
+        val = self.nickname_input.text().strip()
+        if not val:
+            self.nickname_input.setFocus()
+            return
+        self.result_nickname = val
+        self.accept()
 
 
-class SaveGlobalAccountDialog(QDialog):
-    """保存国际服账号对话框（简化版，无密码）"""
-    
-    def __init__(self, parent, email, default_name):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.result_nickname = ""
-        self.setup_ui(email, default_name)
-    
-    def setup_ui(self, email, default_name):
-        self.setFixedSize(450, 280)
-        
-        container = QFrame(self)
-        container.setGeometry(0, 0, 450, 280)
-        container.setStyleSheet(f"""
-            QFrame {{
-                background-color: white;
-                border-radius: 15px;
-                border: 1px solid {COLORS['border']};
-            }}
-        """)
-        
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(30, 25, 30, 25)
-        layout.setSpacing(15)
-        
-        # 标题
-        title = QLabel("🌐 保存国际服账号")
-        title.setFont(QFont("微软雅黑", 14, QFont.Bold))
-        title.setStyleSheet(f"color: #9333ea;")
-        layout.addWidget(title)
-        
-        # 邮箱信息
-        email_label = QLabel(f"邮箱: {email}")
-        email_label.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 12px;")
-        layout.addWidget(email_label)
-        
-        # 昵称输入
-        self.nickname_input = QLineEdit()
-        self.nickname_input.setText(default_name)
-        self.nickname_input.setPlaceholderText("请输入账号昵称")
-        self.nickname_input.setStyleSheet(f"""
-            QLineEdit {{
-                border: 2px solid {COLORS['border']};
-                border-radius: 8px;
-                padding: 10px 12px;
-                background-color: {COLORS['bg']};
-                color: {COLORS['text']};
-                font-size: 13px;
-            }}
-            QLineEdit:focus {{
-                border-color: #9333ea;
-            }}
-        """)
-        layout.addWidget(self.nickname_input)
-        
-        # 提示
-        hint = QLabel("🌐 此账号将标记为国际服账号")
-        hint.setStyleSheet(f"color: #9333ea; font-size: 11px;")
-        layout.addWidget(hint)
-        
-        layout.addStretch()
-        
-        # 按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: white;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                padding: 10px 30px;
-                font-size: 13px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['bg']};
-            }}
-        """)
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(cancel_btn)
-        
-        btn_layout.addSpacing(10)
-        
-        save_btn = QPushButton("确定")
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9333ea;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 10px 30px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #7e22ce;
-            }
-        """)
-        save_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(save_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        if self.parent():
-            parent_geo = self.parent().geometry()
-            self.move(parent_geo.center().x() - 225, parent_geo.center().y() - 140)
-        
-        self.nickname_input.setFocus()
-        self.nickname_input.selectAll()
-    
-    def accept(self):
-        self.result_nickname = self.nickname_input.text()
-        super().accept()
+class SettingsDialog(BaseFramelessDialog):
+    """设置对话框（支持路径自动探测与国际服大区选择）"""
 
+    REGION_OPTIONS = [
+        ("KR", "亚服 / 台服 (KR)"),
+        ("US", "美服 (US)"),
+        ("EU", "欧服 (EU)"),
+    ]
 
-class SettingsDialog(QDialog):
-    """设置对话框"""
-    
-    def __init__(self, parent, settings):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+    def __init__(self, parent, settings: dict):
+        super().__init__(parent, width=520)
         self.settings = settings.copy()
-        self.setup_ui()
-    
-    def setup_ui(self):
-        self.setFixedSize(500, 350)
-        
-        container = QFrame(self)
-        container.setGeometry(0, 0, 500, 350)
-        container.setStyleSheet(f"""
-            QFrame {{
-                background-color: white;
-                border-radius: 15px;
-                border: 1px solid {COLORS['border']};
-            }}
-        """)
-        
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(30, 25, 30, 25)
-        layout.setSpacing(15)
-        
-        # 标题
+        self._setup_content()
+
+    def _setup_content(self):
         title = QLabel("⚙️ 设置")
         title.setFont(QFont("微软雅黑", 14, QFont.Bold))
         title.setStyleSheet(f"color: {COLORS['text']};")
-        layout.addWidget(title)
-        
-        # 战网路径设置
-        path_label = QLabel("战网安装路径:")
+        self.body_layout.addWidget(title)
+
+        path_label = QLabel("战网启动程序路径 (Battle.net Launcher.exe):")
         path_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px;")
-        layout.addWidget(path_label)
-        
+        self.body_layout.addWidget(path_label)
+
         path_layout = QHBoxLayout()
+        path_layout.setSpacing(8)
         self.path_input = QLineEdit()
-        self.path_input.setText(self.settings.get('battlenet_path', r'C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe'))
-        self.path_input.setStyleSheet(f"""
+        self.path_input.setText(self.settings.get("battlenet_path") or find_battlenet_exe())
+        self.path_input.setStyleSheet(
+            f"""
             QLineEdit {{
                 border: 2px solid {COLORS['border']};
                 border-radius: 8px;
@@ -698,39 +565,95 @@ class SettingsDialog(QDialog):
             QLineEdit:focus {{
                 border-color: {COLORS['primary']};
             }}
-        """)
-        path_layout.addWidget(self.path_input)
-        
+            """
+        )
+        path_layout.addWidget(self.path_input, 1)
+
+        detect_btn = QPushButton("自动探测")
+        detect_btn.setCursor(Qt.PointingHandCursor)
+        detect_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: white;
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['bg']};
+            }}
+            """
+        )
+        detect_btn.clicked.connect(self._auto_detect_path)
+        path_layout.addWidget(detect_btn)
+
         browse_btn = QPushButton("浏览")
-        browse_btn.setStyleSheet(f"""
+        browse_btn.setCursor(Qt.PointingHandCursor)
+        browse_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {COLORS['primary']};
                 color: white;
                 border: none;
                 border-radius: 8px;
-                padding: 8px 15px;
+                padding: 8px 14px;
                 font-size: 12px;
             }}
             QPushButton:hover {{
                 background-color: {COLORS['primary_dark']};
             }}
-        """)
-        browse_btn.clicked.connect(self.browse_path)
+            """
+        )
+        browse_btn.clicked.connect(self._browse_path)
         path_layout.addWidget(browse_btn)
-        layout.addLayout(path_layout)
-        
-        # 隐藏邮箱/手机号开关
-        self.hide_email_checkbox = QCheckBox("隐藏账号邮箱/手机号")
-        self.hide_email_checkbox.setChecked(self.settings.get('hide_email', False))
-        self.hide_email_checkbox.setStyleSheet(f"""
+        self.body_layout.addLayout(path_layout)
+
+        region_layout = QHBoxLayout()
+        region_label = QLabel("国际服默认启动大区:")
+        region_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px;")
+        region_layout.addWidget(region_label)
+
+        self.region_combo = QComboBox()
+        for code, label in self.REGION_OPTIONS:
+            self.region_combo.addItem(label, code)
+        current_region = self.settings.get("global_region", "KR")
+        idx = self.region_combo.findData(current_region)
+        if idx >= 0:
+            self.region_combo.setCurrentIndex(idx)
+        self.region_combo.setStyleSheet(
+            f"""
+            QComboBox {{
+                border: 2px solid {COLORS['border']};
+                border-radius: 8px;
+                padding: 6px 12px;
+                background-color: {COLORS['bg']};
+                color: {COLORS['text']};
+                font-size: 12px;
+                min-width: 160px;
+            }}
+            QComboBox:focus {{
+                border-color: {COLORS['primary']};
+            }}
+            """
+        )
+        region_layout.addWidget(self.region_combo)
+        region_layout.addStretch()
+        self.body_layout.addLayout(region_layout)
+
+        self.hide_email_checkbox = QCheckBox("列表中隐藏账号邮箱 / 手机号中间位")
+        self.hide_email_checkbox.setChecked(self.settings.get("hide_email", False))
+        self.hide_email_checkbox.setStyleSheet(
+            f"""
             QCheckBox {{
                 color: {COLORS['text']};
                 font-size: 13px;
                 spacing: 8px;
             }}
             QCheckBox::indicator {{
-                width: 20px;
-                height: 20px;
+                width: 18px;
+                height: 18px;
                 border-radius: 4px;
                 border: 2px solid {COLORS['border']};
             }}
@@ -738,128 +661,148 @@ class SettingsDialog(QDialog):
                 background-color: {COLORS['primary']};
                 border-color: {COLORS['primary']};
             }}
-        """)
-        layout.addWidget(self.hide_email_checkbox)
-        
-        layout.addStretch()
-        
-        # 按钮
+            """
+        )
+        self.body_layout.addWidget(self.hide_email_checkbox)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
+
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(f"""
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: white;
                 color: {COLORS['text']};
                 border: 1px solid {COLORS['border']};
                 border-radius: 8px;
-                padding: 10px 30px;
+                padding: 9px 26px;
                 font-size: 13px;
             }}
             QPushButton:hover {{
                 background-color: {COLORS['bg']};
             }}
-        """)
+            """
+        )
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
-        
-        btn_layout.addSpacing(10)
-        
+
         save_btn = QPushButton("保存")
-        save_btn.setStyleSheet(f"""
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setDefault(True)
+        save_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {COLORS['primary']};
                 color: white;
                 border: none;
                 border-radius: 8px;
-                padding: 10px 30px;
+                padding: 9px 26px;
                 font-size: 13px;
                 font-weight: bold;
             }}
             QPushButton:hover {{
                 background-color: {COLORS['primary_dark']};
             }}
-        """)
-        save_btn.clicked.connect(self.accept)
+            """
+        )
+        save_btn.clicked.connect(self._on_save)
         btn_layout.addWidget(save_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        if self.parent():
-            parent_geo = self.parent().geometry()
-            self.move(parent_geo.center().x() - 250, parent_geo.center().y() - 175)
-    
-    def browse_path(self):
-        from PyQt5.QtWidgets import QFileDialog
+
+        self.body_layout.addLayout(btn_layout)
+
+    def _auto_detect_path(self):
+        self.path_input.setText(find_battlenet_exe())
+
+    def _browse_path(self):
+        start_dir = os.path.dirname(self.path_input.text().strip()) or r"C:\Program Files (x86)\Battle.net"
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择战网启动程序", 
-            r"C:\Program Files (x86)\Battle.net",
-            "可执行文件 (*.exe)"
+            self,
+            "选择战网启动程序",
+            start_dir,
+            "可执行文件 (*.exe)",
         )
         if path:
             self.path_input.setText(path)
-    
-    def accept(self):
-        self.settings['battlenet_path'] = self.path_input.text()
-        self.settings['hide_email'] = self.hide_email_checkbox.isChecked()
-        super().accept()
-    
-    def get_settings(self):
+
+    def _on_save(self):
+        self.settings["battlenet_path"] = self.path_input.text().strip()
+        self.settings["global_region"] = self.region_combo.currentData() or "KR"
+        self.settings["hide_email"] = self.hide_email_checkbox.isChecked()
+        self.accept()
+
+    def get_settings(self) -> dict:
         return self.settings
 
 
 class AccountCard(QFrame):
-    """账号卡片组件"""
-    
-    clicked = pyqtSignal(str)
+    """单个账号卡片组件"""
+
     switch_clicked = pyqtSignal(str)
     delete_clicked = pyqtSignal(str)
     rename_clicked = pyqtSignal(str)
     toggle_version_clicked = pyqtSignal(str)
     update_clicked = pyqtSignal(str)
-    
-    def __init__(self, account_id, nickname, status, email="", last_login="", version="国服", hide_email=False, parent=None):
+
+    def __init__(
+        self,
+        account_id: str,
+        nickname: str,
+        has_data: bool,
+        is_current: bool = False,
+        email: str = "",
+        last_login: str = "",
+        version: str = "国服",
+        hide_email: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.account_id = account_id
-        self.nickname = nickname
-        self.status = status
+        self.nickname = nickname or "未命名"
+        self.has_data = has_data
+        self.is_current = is_current
         self.version = version
         self.hide_email = hide_email
-        # 处理邮箱显示
-        display_email = self.mask_email(email) if hide_email and email else email
-        self.setup_ui(display_email, last_login)
+        display_email = self.mask_email(email) if (hide_email and email) else email
+        self._setup_ui(display_email, last_login)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
-    
-    def mask_email(self, email):
-        """隐藏邮箱/手机号中间部分"""
-        if not email:
+
+    @staticmethod
+    def mask_email(value: str) -> str:
+        """安全隐藏邮箱、手机号或短用户名中间部分"""
+        if not value:
             return ""
-        if '@' in email:
-            # 邮箱格式
-            parts = email.split('@')
-            name = parts[0]
-            if len(name) > 2:
-                masked = name[0] + '*' * (len(name) - 2) + name[-1]
+        if "@" in value:
+            name, domain = value.split("@", 1)
+            if len(name) <= 1:
+                masked = "*"
+            elif len(name) == 2:
+                masked = name[0] + "*"
             else:
-                masked = name[0] + '*'
-            return masked + '@' + parts[1]
-        else:
-            # 手机号格式
-            if len(email) > 4:
-                return email[:3] + '*' * (len(email) - 6) + email[-3:]
-            return email
-    
+                masked = name[0] + "*" * min(len(name) - 2, 6) + name[-1]
+            return f"{masked}@{domain}"
+
+        n = len(value)
+        if n >= 11:
+            return value[:3] + "****" + value[-4:]
+        if n >= 7:
+            return value[:2] + "*" * (n - 4) + value[-2:]
+        if n >= 3:
+            return value[0] + "*" * (n - 2) + value[-1]
+        if n == 2:
+            return value[0] + "*"
+        return "*"
+
     def mouseDoubleClickEvent(self, event):
-        """双击切换账号"""
-        self.switch_clicked.emit(self.account_id)
-    
-    def show_context_menu(self, pos):
-        """显示右键菜单"""
-        from PyQt5.QtWidgets import QMenu
+        if event.button() == Qt.LeftButton:
+            self.switch_clicked.emit(self.account_id)
+
+    def show_context_menu(self, pos: QPoint):
         menu = QMenu(self)
-        menu.setStyleSheet(f"""
+        menu.setStyleSheet(
+            f"""
             QMenu {{
                 background-color: white;
                 border: 1px solid {COLORS['border']};
@@ -867,134 +810,161 @@ class AccountCard(QFrame):
                 padding: 5px;
             }}
             QMenu::item {{
-                padding: 8px 20px;
+                padding: 8px 18px;
                 border-radius: 4px;
+                color: {COLORS['text']};
             }}
             QMenu::item:selected {{
                 background-color: {COLORS['bg']};
             }}
-        """)
-        
-        switch_action = menu.addAction("🔄 切换")
-        update_action = menu.addAction("💾 更新账号数据")
+            """
+        )
+
+        primary_label = "🚀 启动并同步最新备份" if self.is_current else "🔄 切换到此账号"
+        switch_action = menu.addAction(primary_label)
+        update_action = menu.addAction("💾 用当前战网状态更新备份")
         rename_action = menu.addAction("✏️ 重命名")
-        
+        toggle_label = "🇨🇳 标记为国服" if self.version == "国际服" else "🌐 标记为国际服"
+        toggle_version_action = menu.addAction(toggle_label)
+
         menu.addSeparator()
-        delete_action = menu.addAction("🗑️ 删除")
-        
+        delete_action = menu.addAction("🗑️ 删除账号")
+
         action = menu.exec_(self.mapToGlobal(pos))
-        
         if action == switch_action:
             self.switch_clicked.emit(self.account_id)
         elif action == update_action:
             self.update_clicked.emit(self.account_id)
         elif action == rename_action:
             self.rename_clicked.emit(self.account_id)
+        elif action == toggle_version_action:
+            self.toggle_version_clicked.emit(self.account_id)
         elif action == delete_action:
             self.delete_clicked.emit(self.account_id)
-        
-    def setup_ui(self, email, last_login):
+
+    def _setup_ui(self, email: str, last_login: str):
         self.setObjectName("accountCard")
-        self.setFixedHeight(120)  # 增加高度容纳三个按钮
+        self.setFixedHeight(120)
         self.setCursor(Qt.PointingHandCursor)
-        
-        # 卡片样式
-        self.setStyleSheet(f"""
+
+        bg_color = COLORS["card_active"] if self.is_current else COLORS["card"]
+        border_rule = f"2px solid {COLORS['primary']}" if self.is_current else "1px solid transparent"
+        self.setStyleSheet(
+            f"""
             QFrame#accountCard {{
-                background-color: {COLORS['card']};
+                background-color: {bg_color};
                 border-radius: 12px;
-                border: none;
+                border: {border_rule};
             }}
             QFrame#accountCard:hover {{
                 background-color: {COLORS['card_hover']};
             }}
-        """)
-        
-        # 添加阴影效果
-        shadow = QGraphicsDropShadowEffect()
+            """
+        )
+
+        shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(10)
-        shadow.setColor(QColor(0, 0, 0, 30))
+        shadow.setColor(QColor(0, 0, 0, 28))
         shadow.setOffset(0, 2)
         self.setGraphicsEffect(shadow)
-        
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 15, 20, 15)
+        layout.setContentsMargins(20, 14, 20, 14)
         layout.setSpacing(15)
-        
-        # 头像区域
+
+        avatar_bg = COLORS["global"] if self.version == "国际服" else COLORS["primary"]
         avatar = QLabel()
-        avatar.setFixedSize(60, 60)
-        avatar.setStyleSheet(f"""
-            background-color: {COLORS['primary']};
-            border-radius: 30px;
+        avatar.setFixedSize(56, 56)
+        avatar.setStyleSheet(
+            f"""
+            background-color: {avatar_bg};
+            border-radius: 28px;
             color: white;
-            font-size: 24px;
+            font-size: 22px;
             font-weight: bold;
-        """)
+            """
+        )
         avatar.setAlignment(Qt.AlignCenter)
-        avatar.setText(self.nickname[0].upper() if self.nickname else "?")
+        first_char = self.nickname.strip()[0].upper() if self.nickname.strip() else "?"
+        avatar.setText(first_char)
         layout.addWidget(avatar)
-        
-        # 信息区域
+
         info_layout = QVBoxLayout()
         info_layout.setSpacing(4)
-        
+
         name_label = QLabel(self.nickname)
         name_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 16px; font-weight: bold;")
         info_layout.addWidget(name_label)
-        
-        email_label = QLabel(email or "未知邮箱")
+
+        email_label = QLabel(email or "未记录账号名")
         email_label.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 12px;")
         info_layout.addWidget(email_label)
-        
-        time_label = QLabel(f"最后登录: {last_login}" if last_login else "")
+
+        time_label = QLabel(f"最后活跃: {last_login}" if last_login else "")
         time_label.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 11px;")
         info_layout.addWidget(time_label)
-        
+
         layout.addLayout(info_layout, 1)
-        
-        # 版本和状态标签容器
+
         tags_layout = QVBoxLayout()
-        tags_layout.setSpacing(4)
-        
-        # 版本标签
-        version_color = "#9333ea" if self.version == "国际服" else COLORS['primary']
+        tags_layout.setSpacing(5)
+        tags_layout.setAlignment(Qt.AlignVCenter)
+
+        version_color = COLORS["global"] if self.version == "国际服" else COLORS["primary"]
         version_label = QLabel(self.version)
-        version_label.setStyleSheet(f"""
+        version_label.setAlignment(Qt.AlignCenter)
+        version_label.setStyleSheet(
+            f"""
             color: white;
             background-color: {version_color};
-            padding: 3px 8px;
+            padding: 3px 9px;
             border-radius: 8px;
             font-size: 10px;
-        """)
+            font-weight: bold;
+            """
+        )
         version_label.setFixedHeight(22)
         tags_layout.addWidget(version_label)
-        
-        # 状态标签
-        status_text = "已登录" if self.status else "未登录"
-        status_color = COLORS['success'] if self.status else COLORS['warning']
+
+        if self.is_current and self.has_data:
+            status_text = "⚡ 当前归属"
+            status_color = COLORS["success"]
+        elif self.has_data:
+            status_text = "已备份"
+            status_color = "#64748b"
+        else:
+            status_text = "⚠️ 备份不完整"
+            status_color = COLORS["warning"]
+
         status_label = QLabel(status_text)
-        status_label.setStyleSheet(f"""
+        status_label.setAlignment(Qt.AlignCenter)
+        status_label.setStyleSheet(
+            f"""
             color: white;
             background-color: {status_color};
-            padding: 3px 8px;
+            padding: 3px 9px;
             border-radius: 8px;
             font-size: 10px;
-        """)
+            font-weight: bold;
+            """
+        )
         status_label.setFixedHeight(22)
         tags_layout.addWidget(status_label)
-        
+
         layout.addLayout(tags_layout)
-        
-        # 操作按钮
+
         btn_layout = QVBoxLayout()
         btn_layout.setSpacing(5)
-        
-        switch_btn = QPushButton("切换")
-        switch_btn.setFixedSize(70, 32)
-        switch_btn.setStyleSheet(f"""
+
+        action_btn_text = "启动" if self.is_current else "切换"
+        switch_btn = QPushButton(action_btn_text)
+        switch_btn.setFixedSize(72, 32)
+        if self.is_current:
+            switch_btn.setToolTip("同步当前最新滚动凭证并启动战网")
+        switch_btn.setStyleSheet(
+            f"""
             QPushButton {{
-                background-color: {COLORS['primary']};
+                background-color: {COLORS['success'] if self.is_current else COLORS['primary']};
                 color: white;
                 border: none;
                 border-radius: 6px;
@@ -1002,15 +972,17 @@ class AccountCard(QFrame):
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: {COLORS['primary_dark']};
+                background-color: {'#2f855a' if self.is_current else COLORS['primary_dark']};
             }}
-        """)
+            """
+        )
         switch_btn.clicked.connect(lambda: self.switch_clicked.emit(self.account_id))
         btn_layout.addWidget(switch_btn)
-        
+
         rename_btn = QPushButton("重命名")
-        rename_btn.setFixedSize(70, 28)
-        rename_btn.setStyleSheet(f"""
+        rename_btn.setFixedSize(72, 27)
+        rename_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: transparent;
                 color: {COLORS['text_light']};
@@ -1022,13 +994,15 @@ class AccountCard(QFrame):
                 background-color: {COLORS['border']};
                 color: {COLORS['text']};
             }}
-        """)
+            """
+        )
         rename_btn.clicked.connect(lambda: self.rename_clicked.emit(self.account_id))
         btn_layout.addWidget(rename_btn)
-        
+
         delete_btn = QPushButton("删除")
-        delete_btn.setFixedSize(70, 28)
-        delete_btn.setStyleSheet(f"""
+        delete_btn.setFixedSize(72, 27)
+        delete_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: transparent;
                 color: {COLORS['danger']};
@@ -1040,286 +1014,329 @@ class AccountCard(QFrame):
                 background-color: {COLORS['danger']};
                 color: white;
             }}
-        """)
+            """
+        )
         delete_btn.clicked.connect(lambda: self.delete_clicked.emit(self.account_id))
         btn_layout.addWidget(delete_btn)
-        
+
         layout.addLayout(btn_layout)
 
 
-class SwitchThread(QThread):
-    """切换账号的后台线程"""
-    finished = pyqtSignal(bool, str)
-    
-    def __init__(self, switcher, account_id):
-        super().__init__()
-        self.switcher = switcher
-        self.account_id = account_id
-    
-    def run(self):
-        success, msg = self.switcher.switch_to_account(self.account_id)
-        self.finished.emit(success, msg)
-
-
 class ModernGUI(QMainWindow):
-    """现代化的战网账号切换器（无边框可拖拽）"""
-    
+    """战网会话切换器主窗口"""
+
     def __init__(self):
         super().__init__()
         self.switcher = IsolatedSwitcher()
-        self.switch_thread = None
+        self.active_worker = None
+        self._pending_close = False
         self.drag_pos = None
         self.settings = self.load_settings()
         self.apply_settings()
+        self.setStyleSheet(STYLESHEET)
         self.setup_ui()
         self.refresh_accounts()
-    
-    def load_settings(self):
-        """加载设置"""
-        import json
-        settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
-        if getattr(sys, 'frozen', False):
-            settings_file = os.path.join(os.path.dirname(sys.executable), 'data', 'settings.json')
-        try:
-            if os.path.exists(settings_file):
-                with open(settings_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except:
-            pass
-        return {
-            'battlenet_path': r'C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe',
-            'hide_email': False
+        QTimer.singleShot(0, self._check_startup_health)
+
+    # ------------------------------------------------------------------
+    # 启动健康自检、设置持久化与窗口关闭守卫
+    # ------------------------------------------------------------------
+
+    def _check_startup_health(self):
+        if not self.switcher.dir_writable:
+            ModernDialog.show_error(self, "目录不可写", self.switcher.writable_error)
+            return
+        if self.switcher.index_corrupted:
+            ModernDialog.show_error(
+                self,
+                "账号索引损坏保护",
+                f"检测到 {self.switcher.accounts_file} 无法解析，已自动生成 .corrupt 备份并启用只读保护。\n"
+                "在修复索引前不会覆盖原有文件，已有账号备份目录均完好保留。",
+            )
+            return
+        if self.switcher.recovery_error:
+            ModernDialog.show_warning(
+                self,
+                "存在待恢复会话材料",
+                f"{self.switcher.recovery_error}\n\n请先确保战网客户端完全关闭后重新打开本工具。",
+            )
+            return
+        if self.switcher.sid_mismatch_warning:
+            rebind = ModernDialog.show_question(
+                self,
+                "检测到更换了 Windows 用户或电脑",
+                f"{self.switcher.sid_mismatch_warning}\n\n"
+                "如果你确认刚刚把旧电脑/旧目录的 data 文件夹迁移到了当前用户下，是否将其重新绑定到当前用户？",
+            )
+            if rebind:
+                ok, msg = self.switcher.rebind_current_user_sid()
+                if ok:
+                    self.refresh_accounts()
+                    ModernDialog.show_success(self, "绑定完成", msg)
+                else:
+                    ModernDialog.show_error(self, "绑定失败", msg)
+
+    def closeEvent(self, event):
+        """后台写事务运行中拦截 Alt+F4 / 系统关闭，等待安全提交或回滚结束后自动关闭"""
+        if self.active_worker is not None and self.active_worker.isRunning():
+            self._pending_close = True
+            self.busy_label.setText("⏳ 正在等待当前会话事务安全完成后退出...")
+            event.ignore()
+            return
+        event.accept()
+
+    def load_settings(self) -> dict:
+        defaults = {
+            "battlenet_path": self.switcher.BATTLENET_EXE,
+            "global_region": "KR",
+            "hide_email": False,
         }
-    
-    def save_settings(self):
-        """保存设置"""
-        import json
-        settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
-        if getattr(sys, 'frozen', False):
-            settings_file = os.path.join(os.path.dirname(sys.executable), 'data', 'settings.json')
+        legacy_settings = os.path.join(APP_DIR, "settings.json")
+        for path in (SETTINGS_FILE, legacy_settings):
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8-sig") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        raw_path = loaded.get("battlenet_path")
+                        if isinstance(raw_path, str):
+                            defaults["battlenet_path"] = raw_path.strip()
+                        raw_reg = loaded.get("global_region")
+                        if raw_reg in ("KR", "US", "EU"):
+                            defaults["global_region"] = raw_reg
+                        if "hide_email" in loaded:
+                            defaults["hide_email"] = bool(loaded.get("hide_email"))
+                        if path == legacy_settings and not os.path.exists(SETTINGS_FILE) and self.switcher.dir_writable:
+                            self.settings = defaults
+                            self.save_settings()
+                        break
+                except Exception:
+                    pass
+        return defaults
+
+    def save_settings(self) -> tuple:
+        """原子写入设置并返回 (success, error_message)"""
         try:
-            os.makedirs(os.path.dirname(settings_file), exist_ok=True)
-            with open(settings_file, 'w', encoding='utf-8') as f:
-                json.dump(self.settings, f, ensure_ascii=False, indent=2)
+            IsolatedSwitcher._atomic_write_json(SETTINGS_FILE, self.settings)
+            return True, ""
         except Exception as e:
-            print(f"保存设置失败: {e}")
-    
+            return False, str(e)
+
     def apply_settings(self):
-        """应用设置"""
-        if self.settings.get('battlenet_path'):
-            self.switcher.BATTLENET_EXE = self.settings['battlenet_path']
-    
-    def get_icon_path(self):
-        """获取图标路径（支持打包后的exe）"""
-        import sys
-        if getattr(sys, 'frozen', False):
-            # 打包后，图标在exe同目录或_MEIPASS临时目录
-            base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
+        raw_path = self.settings.get("battlenet_path")
+        custom_path = raw_path.strip() if isinstance(raw_path, str) else ""
+        if custom_path and os.path.isfile(custom_path):
+            self.switcher.BATTLENET_EXE = custom_path
         else:
-            base_path = os.path.dirname(__file__)
-        
-        icon_path = os.path.join(base_path, "006.ico")
-        if os.path.exists(icon_path):
-            return icon_path
-        # 也检查exe同目录
-        if getattr(sys, 'frozen', False):
-            icon_path = os.path.join(os.path.dirname(sys.executable), "006.ico")
-            if os.path.exists(icon_path):
-                return icon_path
+            detected = find_battlenet_exe()
+            self.switcher.BATTLENET_EXE = custom_path or detected
+        reg = self.settings.get("global_region")
+        self.switcher.global_region = reg if reg in ("KR", "US", "EU") else "KR"
+
+    @staticmethod
+    def get_icon_path():
+        search_dirs = []
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            search_dirs.append(sys._MEIPASS)
+        search_dirs.append(APP_DIR)
+
+        for folder in search_dirs:
+            for name in ("icon.ico", "006.ico"):
+                candidate = os.path.join(folder, name)
+                if os.path.exists(candidate):
+                    return candidate
         return None
-        
+
+    # ------------------------------------------------------------------
+    # 界面构建与无边框拖拽
+    # ------------------------------------------------------------------
+
     def setup_ui(self):
-        # 无边框窗口
+        self.setWindowTitle(f"{APP_TITLE} v{APP_VERSION}")
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(850, 620)
-        
-        # 设置窗口图标
+        self.setMinimumSize(860, 640)
+
         icon_path = self.get_icon_path()
-        if icon_path and os.path.exists(icon_path):
+        if icon_path:
             self.setWindowIcon(QIcon(icon_path))
-        
-        # 主容器（带圆角和阴影）
+
         container = QWidget()
         self.setCentralWidget(container)
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(10, 10, 10, 10)
-        
-        # 内容框架
+
         self.main_frame = QFrame()
         self.main_frame.setObjectName("mainFrame")
-        self.main_frame.setStyleSheet(f"""
+        self.main_frame.setStyleSheet(
+            f"""
             QFrame#mainFrame {{
                 background-color: {COLORS['bg']};
                 border-radius: 15px;
             }}
-        """)
-        
-        # 添加阴影
-        shadow = QGraphicsDropShadowEffect()
+            """
+        )
+
+        shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20)
         shadow.setColor(QColor(0, 0, 0, 60))
         shadow.setOffset(0, 5)
         self.main_frame.setGraphicsEffect(shadow)
-        
+
         container_layout.addWidget(self.main_frame)
-        
-        # 主布局
+
         main_layout = QHBoxLayout(self.main_frame)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
-        # 左侧边栏
-        sidebar = self.create_sidebar()
-        main_layout.addWidget(sidebar)
-        
-        # 右侧内容区
-        content = self.create_content()
-        main_layout.addWidget(content, 1)
-    
+
+        main_layout.addWidget(self.create_sidebar())
+        main_layout.addWidget(self.create_content(), 1)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_pos = event.globalPos() - self.frameGeometry().topLeft()
             event.accept()
-    
+
     def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and self.drag_pos:
+        if event.buttons() == Qt.LeftButton and self.drag_pos is not None:
             self.move(event.globalPos() - self.drag_pos)
             event.accept()
-    
-    def mouseReleaseEvent(self, event):
+
+    def mouseReleaseEvent(self, _event):
         self.drag_pos = None
-    
-    def create_sidebar(self):
+
+    def create_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(220)
-        
+        sidebar.setFixedWidth(232)
+
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(20, 15, 20, 30)
-        layout.setSpacing(15)
-        
-        # 窗口控制按钮
+        layout.setContentsMargins(20, 15, 20, 20)
+        layout.setSpacing(12)
+
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setSpacing(8)
-        
+
         close_btn = QPushButton("●")
         close_btn.setFixedSize(16, 16)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
+        close_btn.setToolTip("关闭窗口")
+        close_btn.setStyleSheet(
+            """
+            QPushButton {
                 background-color: #ff5f57;
                 border: none;
                 border-radius: 8px;
                 font-size: 8px;
                 color: transparent;
-            }}
-            QPushButton:hover {{
+            }
+            QPushButton:hover {
                 color: #800000;
-            }}
-        """)
+            }
+            """
+        )
         close_btn.clicked.connect(self.close)
         ctrl_layout.addWidget(close_btn)
-        
+
         min_btn = QPushButton("●")
         min_btn.setFixedSize(16, 16)
-        min_btn.setStyleSheet(f"""
-            QPushButton {{
+        min_btn.setToolTip("最小化")
+        min_btn.setStyleSheet(
+            """
+            QPushButton {
                 background-color: #ffbd2e;
                 border: none;
                 border-radius: 8px;
                 font-size: 8px;
                 color: transparent;
-            }}
-            QPushButton:hover {{
+            }
+            QPushButton:hover {
                 color: #805500;
-            }}
-        """)
+            }
+            """
+        )
         min_btn.clicked.connect(self.showMinimized)
         ctrl_layout.addWidget(min_btn)
-        
         ctrl_layout.addStretch()
         layout.addLayout(ctrl_layout)
-        
-        layout.addSpacing(10)
-        
-        # Logo/标题 - 使用自定义图标
+
+        layout.addSpacing(4)
+
         logo_label = QLabel()
         icon_path = self.get_icon_path()
-        if icon_path and os.path.exists(icon_path):
-            logo_pixmap = QPixmap(icon_path).scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if icon_path:
+            logo_pixmap = QPixmap(icon_path).scaled(58, 58, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             logo_label.setPixmap(logo_pixmap)
         else:
             logo_label.setText("🎮")
-            logo_label.setStyleSheet("font-size: 48px;")
+            logo_label.setStyleSheet("font-size: 44px;")
         logo_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(logo_label)
-        
-        title = QLabel("国服战网账号切换")
+
+        title = QLabel(APP_TITLE)
         title.setObjectName("title")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
-        
-        subtitle = QLabel("快速切换多个账号")
+
+        subtitle = QLabel(f"v{APP_VERSION} · 国服 & 国际服切换")
         subtitle.setObjectName("subtitle")
         subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(subtitle)
-        
-        layout.addSpacing(30)
-        
-        # 保存按钮（主要操作）
+
+        layout.addSpacing(14)
+
         save_btn = QPushButton("💾 保存当前登录")
-        save_btn.setFixedHeight(45)
-        save_btn.setStyleSheet(f"""
+        save_btn.setFixedHeight(43)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 {COLORS['primary']}, stop:1 #6366f1);
                 color: white;
                 border: none;
                 border-radius: 10px;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: bold;
             }}
             QPushButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 {COLORS['primary_dark']}, stop:1 #4f46e5);
             }}
-            QPushButton:pressed {{
-                background: {COLORS['primary_dark']};
-            }}
-        """)
+            """
+        )
         save_btn.clicked.connect(self.save_current_login)
         layout.addWidget(save_btn)
-        
-        # 保存当前登录(国际服)按钮
-        save_global_btn = QPushButton("🌐 保存当前登录(国际服)")
-        save_global_btn.setFixedHeight(45)
-        save_global_btn.setStyleSheet(f"""
-            QPushButton {{
+
+        save_global_btn = QPushButton("🌐 保存当前登录 (国际服)")
+        save_global_btn.setFixedHeight(43)
+        save_global_btn.setCursor(Qt.PointingHandCursor)
+        save_global_btn.setStyleSheet(
+            """
+            QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #9333ea, stop:1 #7c3aed);
                 color: white;
                 border: none;
                 border-radius: 10px;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: bold;
-            }}
-            QPushButton:hover {{
+            }
+            QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #7e22ce, stop:1 #6d28d9);
-            }}
-            QPushButton:pressed {{
-                background: #6b21a8;
-            }}
-        """)
+            }
+            """
+        )
         save_global_btn.clicked.connect(self.save_current_login_global)
         layout.addWidget(save_global_btn)
-        
-        layout.addSpacing(15)
-        
-        # 登录新账号按钮
-        new_login_btn = QPushButton("🔄 登录新账号")
-        new_login_btn.setFixedHeight(40)
-        new_login_btn.setStyleSheet(f"""
+
+        layout.addSpacing(6)
+
+        new_login_btn = QPushButton("🔄 登录国服新账号")
+        new_login_btn.setFixedHeight(38)
+        new_login_btn.setCursor(Qt.PointingHandCursor)
+        new_login_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {COLORS['secondary']};
                 color: white;
@@ -1331,16 +1348,18 @@ class ModernGUI(QMainWindow):
             QPushButton:hover {{
                 background-color: #0284c7;
             }}
-        """)
-        new_login_btn.clicked.connect(self.prepare_new_account)
+            """
+        )
+        new_login_btn.clicked.connect(lambda: self.prepare_clean_login(is_global=False))
         layout.addWidget(new_login_btn)
-        
-        # 登录国际服新账号按钮
+
         global_login_btn = QPushButton("🌐 登录国际服新账号")
-        global_login_btn.setFixedHeight(40)
-        global_login_btn.setStyleSheet(f"""
+        global_login_btn.setFixedHeight(38)
+        global_login_btn.setCursor(Qt.PointingHandCursor)
+        global_login_btn.setStyleSheet(
+            f"""
             QPushButton {{
-                background-color: #9333ea;
+                background-color: {COLORS['global']};
                 color: white;
                 border: none;
                 border-radius: 8px;
@@ -1348,18 +1367,20 @@ class ModernGUI(QMainWindow):
                 font-weight: 500;
             }}
             QPushButton:hover {{
-                background-color: #7e22ce;
+                background-color: {COLORS['global_dark']};
             }}
-        """)
-        global_login_btn.clicked.connect(self.prepare_global_account)
+            """
+        )
+        global_login_btn.clicked.connect(lambda: self.prepare_clean_login(is_global=True))
         layout.addWidget(global_login_btn)
-        
-        layout.addSpacing(15)
-        
-        # 战网控制按钮
+
+        layout.addSpacing(6)
+
         start_btn = QPushButton("🚀 启动战网")
-        start_btn.setFixedHeight(40)
-        start_btn.setStyleSheet(f"""
+        start_btn.setFixedHeight(38)
+        start_btn.setCursor(Qt.PointingHandCursor)
+        start_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {COLORS['success']};
                 color: white;
@@ -1369,34 +1390,39 @@ class ModernGUI(QMainWindow):
                 font-weight: 500;
             }}
             QPushButton:hover {{
-                background-color: #059669;
+                background-color: #2f855a;
             }}
-        """)
+            """
+        )
         start_btn.clicked.connect(self.start_battlenet)
         layout.addWidget(start_btn)
-        
+
         close_battlenet_btn = QPushButton("⏹️ 关闭战网")
-        close_battlenet_btn.setFixedHeight(40)
-        close_battlenet_btn.setStyleSheet(f"""
-            QPushButton {{
+        close_battlenet_btn.setFixedHeight(38)
+        close_battlenet_btn.setCursor(Qt.PointingHandCursor)
+        close_battlenet_btn.setStyleSheet(
+            """
+            QPushButton {
                 background-color: #ef4444;
                 color: white;
                 border: none;
                 border-radius: 8px;
                 font-size: 13px;
                 font-weight: 500;
-            }}
-            QPushButton:hover {{
+            }
+            QPushButton:hover {
                 background-color: #dc2626;
-            }}
-        """)
+            }
+            """
+        )
         close_battlenet_btn.clicked.connect(self.close_battlenet)
         layout.addWidget(close_battlenet_btn)
-        
-        # 设置按钮
+
         settings_btn = QPushButton("⚙️ 设置")
-        settings_btn.setFixedHeight(40)
-        settings_btn.setStyleSheet(f"""
+        settings_btn.setFixedHeight(38)
+        settings_btn.setCursor(Qt.PointingHandCursor)
+        settings_btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {COLORS['bg']};
                 color: {COLORS['text']};
@@ -1408,560 +1434,535 @@ class ModernGUI(QMainWindow):
             QPushButton:hover {{
                 background-color: {COLORS['border']};
             }}
-        """)
+            """
+        )
         settings_btn.clicked.connect(self.open_settings)
         layout.addWidget(settings_btn)
-        
+
         layout.addStretch()
-        
-        # 状态信息
-        admin_text = "✅ 管理员模式" if is_admin() else "⚠️ 普通模式"
-        admin_color = COLORS['success'] if is_admin() else COLORS['warning']
-        admin_label = QLabel(admin_text)
-        admin_label.setStyleSheet(f"color: {admin_color}; font-size: 11px;")
-        admin_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(admin_label)
-        
-        # 作者信息
-        author_info = QLabel("免费开源，禁止倒卖\nB站：54006o | QQ：2449995562\n个人站：www.006.kim")
-        author_info.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 10px;")
-        author_info.setAlignment(Qt.AlignCenter)
-        author_info.setWordWrap(True)
-        layout.addWidget(author_info)
-        
+
+        admin_ok = is_admin()
+        priv_text = "🛡️ 管理员权限" if admin_ok else "🛡️ 当前用户权限 (推荐)"
+        priv_color = COLORS["primary_dark"] if admin_ok else COLORS["success"]
+        priv_label = QLabel(priv_text)
+        priv_label.setStyleSheet(f"color: {priv_color}; font-size: 11px;")
+        priv_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(priv_label)
+
+        footer = QLabel(f"源码 MIT · 发行包遵循 GPLv3\n{APP_NAME} v{APP_VERSION}\nBased on 54006/cnbxqhdl")
+        footer.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 10px;")
+        footer.setAlignment(Qt.AlignCenter)
+        footer.setWordWrap(True)
+        layout.addWidget(footer)
+
         return sidebar
-    
-    def create_content(self):
+
+    def create_content(self) -> QWidget:
         content = QWidget()
-        content.setStyleSheet(f"""
-            QWidget {{
+        content.setObjectName("contentArea")
+        content.setStyleSheet(
+            f"""
+            QWidget#contentArea {{
                 background-color: {COLORS['bg']};
                 border-top-right-radius: 15px;
                 border-bottom-right-radius: 15px;
             }}
-        """)
+            """
+        )
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(20)
-        
-        # 标题栏
+        layout.setContentsMargins(28, 26, 28, 24)
+        layout.setSpacing(16)
+
         header = QHBoxLayout()
-        
         title = QLabel("账号列表")
-        title.setStyleSheet(f"color: {COLORS['text']}; font-size: 24px; font-weight: bold;")
+        title.setStyleSheet(f"color: {COLORS['text']}; font-size: 22px; font-weight: bold;")
         header.addWidget(title)
-        
+
+        self.busy_label = QLabel("")
+        self.busy_label.setStyleSheet(f"color: {COLORS['primary_dark']}; font-size: 12px; font-weight: bold;")
+        header.addWidget(self.busy_label)
+
         header.addStretch()
-        
+
         self.count_label = QLabel("共 0 个账号")
-        self.count_label.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 14px;")
+        self.count_label.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 13px;")
         header.addWidget(self.count_label)
-        
+
         refresh_btn = QPushButton("🔄 刷新")
         refresh_btn.setObjectName("secondaryBtn")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.clicked.connect(self.refresh_accounts)
         header.addWidget(refresh_btn)
-        
+
         layout.addLayout(header)
-        
-        # 滚动区域
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
+
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("scrollContent")
         self.cards_layout = QVBoxLayout(self.scroll_content)
-        self.cards_layout.setContentsMargins(0, 0, 10, 0)
-        self.cards_layout.setSpacing(15)
+        self.cards_layout.setContentsMargins(0, 0, 8, 0)
+        self.cards_layout.setSpacing(14)
         self.cards_layout.addStretch()
-        
+
         scroll.setWidget(self.scroll_content)
-        layout.addWidget(scroll)
-        
-        # 使用说明
+        layout.addWidget(scroll, 1)
+
         help_frame = QFrame()
-        help_frame.setStyleSheet(f"""
+        help_frame.setStyleSheet(
+            f"""
             QFrame {{
                 background-color: {COLORS['white']};
                 border-radius: 10px;
                 border: 1px solid {COLORS['border']};
             }}
-        """)
+            """
+        )
         help_layout = QVBoxLayout(help_frame)
         help_layout.setContentsMargins(15, 10, 15, 10)
-        
+        help_layout.setSpacing(4)
+
         help_title = QLabel("💡 使用说明")
-        help_title.setStyleSheet(f"color: {COLORS['text']}; font-size: 13px; font-weight: bold;")
+        help_title.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px; font-weight: bold;")
         help_layout.addWidget(help_title)
-        
-        help_text = QLabel("添加账号：登录战网后点击【保存当前登录】 | 切换：点击账号卡片的【切换】按钮")
-        help_text.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 12px;")
+
+        help_text = QLabel(
+            "添加新号：点击【登录国服/国际服新账号】登录战网（勾选保持登录）后点击【保存当前登录】\n"
+            "日常切号：双击卡片或点击【切换/启动】（切走前会自动同步已识别活跃账号的最新凭证；右键卡片可修改区服标记或更新备份）"
+        )
+        help_text.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 11px;")
         help_text.setWordWrap(True)
         help_layout.addWidget(help_text)
-        
+
         layout.addWidget(help_frame)
-        
         return content
-    
+
+    # ------------------------------------------------------------------
+    # 异步任务调度（严格等待 QThread.finished 后释放并响应挂起关闭）
+    # ------------------------------------------------------------------
+
+    def _run_background_task(self, status_text: str, fn, on_done, *args, **kwargs):
+        if self.active_worker is not None and self.active_worker.isRunning():
+            return
+        self.busy_label.setText(f"⏳ {status_text}")
+        self.main_frame.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        worker = TaskThread(fn, *args, **kwargs)
+        self.active_worker = worker
+
+        def _on_thread_finished():
+            self.busy_label.setText("")
+            self.main_frame.setEnabled(True)
+            QApplication.restoreOverrideCursor()
+            self.active_worker = None
+            worker.deleteLater()
+
+            if self._pending_close:
+                self._pending_close = False
+                self.close()
+                return
+
+            if worker.outcome_ok:
+                on_done(worker.outcome_value)
+            else:
+                ModernDialog.show_error(self, "操作异常", f"执行过程中出现异常：\n{worker.outcome_error}")
+                self.refresh_accounts()
+
+        worker.finished.connect(_on_thread_finished, Qt.QueuedConnection)
+        worker.start()
+
+    def _find_existing_account_by_email(self, email: str, version: str):
+        """按 (认证域 cn/global + 归一化邮箱/手机号) 联合判重，避免同邮箱跨区服互相覆盖"""
+        norm = (email or "").strip().lower()
+        if not norm:
+            return None, None
+        for acc_id, acc_info in self.switcher.accounts.items():
+            if not isinstance(acc_info, dict):
+                continue
+            existing_ver = acc_info.get("version", "cn")
+            existing_norm = (acc_info.get("email") or "").strip().lower()
+            if existing_ver == version and existing_norm and existing_norm == norm:
+                return acc_id, acc_info
+        return None, None
+
+    # ------------------------------------------------------------------
+    # 账号列表刷新与交互逻辑
+    # ------------------------------------------------------------------
+
     def refresh_accounts(self):
-        # 清除现有卡片
         while self.cards_layout.count() > 1:
             item = self.cards_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        
-        # 获取账号列表
+
         accounts = self.switcher.get_all_accounts()
-        
         for acc in accounts:
-            last_login = acc.get('last_login', '')
+            last_login = acc.get("last_login", "")
             if last_login:
                 try:
                     dt = datetime.fromisoformat(last_login)
-                    last_login = dt.strftime('%Y-%m-%d %H:%M:%S')  # 精确到秒
-                except:
+                    last_login = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
                     pass
-            
-            email = self.switcher.accounts.get(acc['id'], {}).get('email', '')
-            version = self.switcher.accounts.get(acc['id'], {}).get('version', 'cn')
+
+            acc_raw = self.switcher.accounts.get(acc["id"], {})
+            email = acc_raw.get("email", "")
+            version = acc_raw.get("version", "cn")
             version_text = "国际服" if version == "global" else "国服"
-            
+
             card = AccountCard(
-                acc['id'],
-                acc['nickname'],
-                acc['logged_in'] and acc['has_data'],
-                email,
-                last_login,
-                version_text,
-                self.settings.get('hide_email', False)
+                account_id=acc["id"],
+                nickname=acc["nickname"],
+                has_data=acc["has_data"],
+                is_current=acc.get("is_current", False),
+                email=email,
+                last_login=last_login,
+                version=version_text,
+                hide_email=self.settings.get("hide_email", False),
             )
             card.switch_clicked.connect(self.switch_account)
             card.delete_clicked.connect(self.delete_account)
             card.rename_clicked.connect(self.rename_account)
             card.toggle_version_clicked.connect(self.toggle_version)
             card.update_clicked.connect(self.update_account_data)
-            
+
             self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
-        
+
         self.count_label.setText(f"共 {len(accounts)} 个账号")
-    
-    def prepare_new_login(self):
-        """准备添加新账号 - 创建干净的临时目录"""
-        reply = ModernDialog.show_question(
-            self, "准备新登录",
-            "这将关闭战网并创建一个干净的环境。\n\n"
-            "之后请在战网中登录新账号，\n"
-            "登录成功后点击【保存当前登录】。\n\n"
-            "确定继续？"
+
+    def prepare_clean_login(self, is_global: bool = False):
+        server_name = "国际服" if is_global else "国服"
+        save_btn_name = "【保存当前登录 (国际服)】" if is_global else "【保存当前登录】"
+
+        has_unsaved, temp_ident = self.switcher.has_unsaved_temp_login()
+        unsaved_warn = (
+            f"⚠️ 注意：当前存在尚未保存的临时登录会话（{temp_ident}），继续操作将清除该未保存会话！\n\n"
+            if has_unsaved
+            else ""
         )
-        
+
+        reply = ModernDialog.show_question(
+            self,
+            f"登录{server_name}新账号",
+            f"{unsaved_warn}"
+            f"即将关闭战网，保护当前已保存活跃账号的最新状态，并重置本机为干净的{server_name}登录环境。\n\n"
+            f"战网启动后请登录新账号（建议勾选“保持登录”），\n"
+            f"进入主界面后点击左侧 {save_btn_name} 即可。",
+        )
         if not reply:
             return
-        
-        temp_id = self.switcher.prepare_for_new_login()
-        if temp_id:
-            # 启动战网
-            self.switcher.start_battlenet()
+
+        region = self.settings.get("global_region", "KR") if is_global else "CN"
+
+        def _task():
+            ok, res = self.switcher.prepare_for_new_login()
+            if not ok:
+                return False, res
+            started = self.switcher.start_battlenet(region=region)
+            return True, started
+
+        def _done(result):
+            ok, payload = result
+            self.refresh_accounts()
+            if not ok:
+                ModernDialog.show_error(self, "准备失败", str(payload))
+                return
+            started_hint = "战网已启动。" if payload else "未能自动启动战网，请手动打开战网。"
             ModernDialog.show_info(
-                self, "准备完成",
-                "已创建干净的登录环境。\n\n"
-                "请在战网中登录账号，\n"
-                "登录成功后点击【保存当前登录】保存。"
+                self,
+                "准备完成",
+                f"已重置为干净的{server_name}登录环境，{started_hint}\n\n"
+                f"请在战网中完成登录，主界面加载后点击 {save_btn_name}。",
             )
-        else:
-            ModernDialog.show_error(self, "错误", "准备新登录失败")
-    
-    def save_current_login(self):
-        """保存当前登录的账号 - 自动创建新的隔离文件夹"""
-        if not self.switcher.is_battlenet_running():
-            ModernDialog.show_info(self, "提示", "请先启动战网并登录账号")
-            return
-        
-        # 获取当前登录账号信息
-        account_info = self.switcher.get_current_logged_account()
-        
-        if not account_info.get("email") and not account_info.get("battletag"):
-            ModernDialog.show_info(self, "提示", "无法识别当前登录的账号\n\n请确保已在战网中登录")
-            return
-        
-        default_name = account_info.get("battletag") or account_info.get("account_name") or "未知账号"
-        email = account_info.get("email", "")
-        
-        # 检查是否已存在相同邮箱的账号
-        for acc_id, acc_info in self.switcher.accounts.items():
-            if acc_info.get("email") == email:
+
+        self._run_background_task(f"正在准备{server_name}干净登录环境...", _task, _done)
+
+    def _save_login_common(self, is_global: bool):
+        server_name = "国际服" if is_global else "国服"
+        force_version = "global" if is_global else "cn"
+
+        def _detect_task():
+            running = self.switcher.is_battlenet_client_open()
+            info = self.switcher.get_current_logged_account() if running else {}
+            logout_flag = self.switcher.has_recent_logout_signal() if running else False
+            return running, info, logout_flag
+
+        def _after_detect(res):
+            running, account_info, logout_flag = res
+            if not running:
+                ModernDialog.show_info(self, "提示", f"请先启动战网并登录{server_name}账号")
+                return
+
+            raw_cfg_email = (account_info.get("email") or "").strip()
+            battletag = (account_info.get("battletag") or "").strip()
+            if not is_global and not raw_cfg_email and not battletag:
+                ModernDialog.show_info(self, "提示", "无法识别当前登录的账号\n\n请确保已在战网客户端中完成登录并进入主界面")
+                return
+
+            logout_warn = (
+                "⚠️ 检测到战网近期日志包含退出登录记录，请务必确认客户端当前已重新进入主界面（而非停留在登录框）！\n\n"
+                if logout_flag
+                else ""
+            )
+
+            default_name = battletag or account_info.get("account_name") or ("" if is_global else "新账号")
+            display_ident = (raw_cfg_email or battletag) if is_global else raw_cfg_email
+
+            existing_id, existing_info = self._find_existing_account_by_email(display_ident, force_version)
+            if existing_id:
                 reply = ModernDialog.show_question(
-                    self, "账号已存在",
-                    f"邮箱 {email} 对应的账号已存在\n昵称: {acc_info.get('nickname')}\n\n"
-                    "是否更新该账号的数据？（会覆盖旧数据）"
+                    self,
+                    "同区服账号已存在",
+                    f"{logout_warn}"
+                    f"{server_name}账号 {display_ident} 已存在（昵称：【{existing_info.get('nickname')}】）。\n\n"
+                    "是否用当前战网登录状态更新该账号备份？",
                 )
                 if reply:
-                    # 更新现有账号的数据
-                    self.switcher.update_account_data(acc_id)
-                    self.switcher.mark_logged_in(acc_id)
-                    self.switcher._save_accounts()
-                    self.refresh_accounts()
-                    ModernDialog.show_success(self, "成功", f"账号【{acc_info.get('nickname')}】数据已更新")
-                return
-        
-        # 保存对话框（国服账号）
-        dialog = SaveAccountDialog(self, email, default_name)
-        if dialog.exec_() == QDialog.Accepted and dialog.result_nickname:
-            nickname = dialog.result_nickname
-            
-            # 记录保存前已有多少账号
-            existing_count = len(self.switcher.accounts)
-            
-            # 自动创建新文件夹并保存（国服账号）
-            account_id = self.switcher.create_account_from_current(nickname, force_version="cn")
-            if account_id:
-                self.switcher.accounts[account_id]["email"] = email
-                self.switcher.accounts[account_id]["battletag"] = account_info.get("battletag")
-                self.switcher.accounts[account_id]["version"] = "cn"
-                self.switcher._save_accounts()
-                self.refresh_accounts()
-                
-                # 如果之前已有账号，提示需要重新保存
-                if existing_count > 0:
-                    ModernDialog.show_info(
-                        self, "保存成功", 
-                        f"已保存账号【{nickname}】\n\n"
-                        "⚠️ 重要提示：\n"
-                        "由于战网会话机制限制，之前保存的账号可能无法自动登录。\n\n"
-                        "请依次登录并重新保存所有之前的账号，\n"
-                        "这样所有账号就能正常切换了。"
-                    )
-                else:
-                    ModernDialog.show_success(self, "成功", f"已保存账号【{nickname}】")
-            else:
-                ModernDialog.show_error(self, "错误", "保存账号数据失败")
-    
-    def save_current_login_global(self):
-        """保存当前登录的国际服账号"""
-        if not self.switcher.is_battlenet_running():
-            ModernDialog.show_info(self, "提示", "请先启动战网并登录国际服账号")
-            return
-        
-        # 获取当前登录账号信息
-        account_info = self.switcher.get_current_logged_account()
-        
-        # 国际服可能无法自动识别邮箱，使用BattleTag或让用户输入
-        default_name = account_info.get("battletag") or account_info.get("account_name") or ""
-        email = account_info.get("email") or account_info.get("battletag") or ""
-        
-        # 检查是否已存在相同邮箱的账号
-        for acc_id, acc_info in self.switcher.accounts.items():
-            if acc_info.get("email") == email:
-                reply = ModernDialog.show_question(
-                    self, "账号已存在",
-                    f"邮箱 {email} 对应的账号已存在\n昵称: {acc_info.get('nickname')}\n\n"
-                    "是否更新该账号的数据？（会覆盖旧数据）"
-                )
-                if reply:
-                    self.switcher.update_account_data(acc_id)
-                    self.switcher.mark_logged_in(acc_id)
-                    self.switcher._save_accounts()
-                    self.refresh_accounts()
-                    ModernDialog.show_success(self, "成功", f"账号【{acc_info.get('nickname')}】数据已更新")
-                return
-        
-        # 使用国际服专用对话框
-        dialog = SaveGlobalAccountDialog(self, email, default_name)
-        if dialog.exec_() == QDialog.Accepted and dialog.result_nickname:
-            nickname = dialog.result_nickname
-            
-            # 强制设置为国际服版本
-            account_id = self.switcher.create_account_from_current(nickname, force_version="global")
-            if account_id:
-                self.switcher.accounts[account_id]["email"] = email
-                self.switcher.accounts[account_id]["battletag"] = account_info.get("battletag")
-                self.switcher.accounts[account_id]["version"] = "global"
-                self.switcher._save_accounts()
-                self.refresh_accounts()
-                ModernDialog.show_success(self, "成功", f"已保存国际服账号【{nickname}】")
-            else:
-                ModernDialog.show_error(self, "错误", "保存账号数据失败")
-    
-    def auto_add_account(self):
-        if not self.switcher.is_battlenet_running():
-            ModernDialog.show_info(self, "提示", "请先启动战网并登录账号")
-            return
-        
-        account_info = self.switcher.get_current_logged_account()
-        
-        if not account_info.get("email") and not account_info.get("battletag"):
-            ModernDialog.show_info(self, "提示", "无法识别当前登录的账号\n\n请确保已在战网中登录")
-            return
-        
-        default_name = account_info.get("battletag") or account_info.get("account_name") or "未知账号"
-        email = account_info.get("email", "")
-        
-        nickname, ok = ModernInputDialog.get_text(
-            self, "🎮 识别到账号",
-            f"邮箱/手机: {email}\nBattleTag: {account_info.get('battletag', '未知')}\n\n请输入账号昵称：",
-            default_name
-        )
-        
-        if ok and nickname:
-            # 检查是否已存在
-            for acc_id, acc_info in self.switcher.accounts.items():
-                if acc_info.get("email") == email:
-                    reply = ModernDialog.show_question(
-                        self, "账号已存在",
-                        f"邮箱 {email} 对应的账号已存在\n昵称: {acc_info.get('nickname')}\n\n是否更新该账号的登录状态？"
-                    )
-                    if reply:
-                        self.switcher.mark_logged_in(acc_id)
-                        self.switcher.accounts[acc_id]["email"] = email
-                        self.switcher.accounts[acc_id]["battletag"] = account_info.get("battletag")
-                        self.switcher._save_accounts()
+                    def _update_done(upd_res):
+                        ok, msg = upd_res
                         self.refresh_accounts()
-                        ModernDialog.show_success(self, "成功", f"账号【{acc_info.get('nickname')}】登录状态已更新")
+                        if ok:
+                            ModernDialog.show_success(self, "更新成功", f"账号【{existing_info.get('nickname')}】备份已更新")
+                        else:
+                            ModernDialog.show_error(self, "更新失败", f"{msg}\n\n调试日志目录: {LOGS_DIR}")
+
+                    self._run_background_task(
+                        "正在更新账号备份...",
+                        self.switcher.update_account_data,
+                        _update_done,
+                        existing_id,
+                    )
+                return
+
+            if logout_flag:
+                if not ModernDialog.show_question(
+                    self,
+                    "检测到近期退出记录",
+                    f"{logout_warn}是否仍要将当前战网状态保存为新账号？",
+                ):
                     return
-            
-            # 创建新账号
-            account_id = self.switcher.create_account_from_current(nickname)
-            if account_id:
-                self.switcher.accounts[account_id]["email"] = email
-                self.switcher.accounts[account_id]["battletag"] = account_info.get("battletag")
-                self.switcher.mark_logged_in(account_id)
-                self.switcher._save_accounts()
-                self.refresh_accounts()
-                ModernDialog.show_success(self, "成功", f"已添加并保存账号【{nickname}】\n邮箱: {email}")
-            else:
-                ModernDialog.show_error(self, "错误", "保存账号数据失败")
-    
-    def prepare_new_account(self):
-        """清除当前登录状态，准备登录新账号（保留地区设置）"""
-        reply = ModernDialog.show_question(
-            self, "登录新账号",
-            "这将清除当前的登录状态，让你可以登录新账号。\n\n"
-            "⚠️ 请确保已保存当前账号再继续。\n\n"
-            "确定继续？"
-        )
-        if not reply:
-            return
-        
-        import shutil
-        import json
-        import time
-        
-        # 关闭战网
-        if self.switcher.is_battlenet_running():
-            self.switcher.close_battlenet()
-            time.sleep(2)
-        
-        # 清除Roaming下的BrowserCaches
-        roaming_cache = os.path.join(self.switcher.BATTLENET_ROAMING, "BrowserCaches")
-        if os.path.exists(roaming_cache):
-            shutil.rmtree(roaming_cache, ignore_errors=True)
-        
-        # 清除LocalAppData下的BrowserCaches  
-        local_cache = os.path.join(self.switcher.BATTLENET_LOCAL, "BrowserCaches")
-        if os.path.exists(local_cache):
-            shutil.rmtree(local_cache, ignore_errors=True)
-        
-        # 修改config，清除SavedAccountNames但保留其他设置
-        config_path = os.path.join(self.switcher.BATTLENET_ROAMING, "Battle.net.config")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                if "Client" in config:
-                    config["Client"]["SavedAccountNames"] = ""
-                    config["Client"]["AutoLogin"] = "false"
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(config, f, indent=2)
-            except:
-                pass
-        
-        # 启动战网（指定中国区）
-        self.switcher.start_battlenet(region="CN")
-        
-        ModernDialog.show_info(
-            self, "准备完成",
-            "已清除登录状态，战网已启动。\n\n"
-            "请登录新账号，登录成功后点击【保存当前登录】。"
-        )
-    
-    def prepare_global_account(self):
-        """准备登录国际服新账号 - 使用和国服相同的方法"""
-        reply = ModernDialog.show_question(
-            self, "登录国际服新账号",
-            "这将关闭战网并创建一个干净的环境。\n\n"
-            "之后请在战网中登录国际服账号，\n"
-            "登录成功后点击【保存当前登录(国际服)】。\n\n"
-            "确定继续？"
-        )
-        if not reply:
-            return
-        
-        # 使用和国服相同的方法创建干净环境
-        temp_id = self.switcher.prepare_for_new_login()
-        if temp_id:
-            # 启动战网（指定KR区）
-            self.switcher.start_battlenet(region="KR")
-            ModernDialog.show_info(
-                self, "准备完成",
-                "已创建干净的登录环境，战网已启动（国际服）。\n\n"
-                "请登录国际服账号，\n"
-                "登录成功后点击【保存当前登录(国际服)】保存。"
-            )
-        else:
-            ModernDialog.show_error(self, "错误", "准备新登录失败")
-    
-    def manual_add_account(self):
-        nickname, ok = ModernInputDialog.get_text(self, "➕ 创建账号", "请输入账号昵称（便于识别）：", "")
-        if ok and nickname:
-            account_id = self.switcher.create_account(nickname)
-            self.refresh_accounts()
-            
-            reply = ModernDialog.show_question(
-                self, "创建成功",
-                f"已创建账号【{nickname}】\n\n是否立即切换到该账号进行登录？"
-            )
-            if reply:
-                self.switch_account(account_id)
-    
-    def switch_account(self, account_id):
-        acc_info = self.switcher.accounts.get(account_id, {})
-        nickname = acc_info.get('nickname', '未知')
-        
-        # 禁用UI
-        self.setEnabled(False)
-        self.setWindowTitle(f"暴雪战网账号切换器 - 正在切换到 {nickname}...")
-        
-        self.switch_thread = SwitchThread(self.switcher, account_id)
-        self.switch_thread.finished.connect(lambda s, m: self.on_switch_finished(s, m, account_id))
-        self.switch_thread.start()
-    
-    def on_switch_finished(self, success, msg, account_id):
-        self.setEnabled(True)
-        self.setWindowTitle("暴雪战网账号切换器")
-        
-        acc_info = self.switcher.accounts.get(account_id, {})
-        nickname = acc_info.get('nickname', '未知')
-        version = acc_info.get('version', 'cn')
-        
-        if success:
-            if acc_info.get('logged_in'):
-                ModernDialog.show_success(self, "切换成功", f"已切换到账号【{nickname}】\n\n战网应该会自动登录")
-            else:
-                ModernDialog.show_info(
-                    self, "切换成功",
-                    f"已切换到账号【{nickname}】\n\n请在战网中完成登录\n登录成功后再次点击【保存当前登录】保存状态"
+
+            dialog = SaveAccountDialog(self, display_ident, default_name, is_global=is_global)
+            if dialog.exec_() != QDialog.Accepted or not dialog.result_nickname:
+                return
+
+            nickname = dialog.result_nickname
+
+            def _save_task():
+                acc_id = self.switcher.create_account_from_current(
+                    nickname=nickname,
+                    force_version=force_version,
+                    expected_email=raw_cfg_email,
+                    expected_battletag=battletag,
                 )
-        else:
-            ModernDialog.show_error(self, "切换失败", f"切换失败: {msg}")
-        
-        self.refresh_accounts()
-    
-    def rename_account(self, account_id):
-        """重命名账号"""
+                return acc_id, self.switcher.last_error
+
+            def _save_done(save_res):
+                acc_id, err = save_res
+                self.refresh_accounts()
+                if acc_id:
+                    ModernDialog.show_success(self, "保存成功", f"已保存{server_name}账号【{nickname}】")
+                else:
+                    ModernDialog.show_error(self, "保存失败", f"{err or '保存账号数据失败'}\n\n调试日志目录: {LOGS_DIR}")
+
+            self._run_background_task(f"正在保存{server_name}账号【{nickname}】...", _save_task, _save_done)
+
+        self._run_background_task("正在读取当前战网登录信息...", _detect_task, _after_detect)
+
+    def save_current_login(self):
+        self._save_login_common(is_global=False)
+
+    def save_current_login_global(self):
+        self._save_login_common(is_global=True)
+
+    def switch_account(self, account_id: str):
         acc_info = self.switcher.accounts.get(account_id, {})
-        old_nickname = acc_info.get('nickname', '未知')
-        
+        nickname = acc_info.get("nickname", "未知")
+        is_current = account_id == self.switcher.current_account_id
+        action_text = f"正在同步并启动【{nickname}】..." if is_current else f"正在切换到【{nickname}】..."
+
+        def _done(res):
+            success, msg = res
+            self.refresh_accounts()
+            if success:
+                ModernDialog.show_success(
+                    self,
+                    "操作完成",
+                    f"{msg}\n\n若本地凭证仍在有效期内将自动进入主界面；若已过期请手动登录一次并更新备份。",
+                )
+            else:
+                ModernDialog.show_error(self, "切换失败", f"{msg}\n\n调试日志目录: {LOGS_DIR}")
+
+        self._run_background_task(action_text, self.switcher.switch_to_account, _done, account_id)
+
+    def rename_account(self, account_id: str):
+        acc_info = self.switcher.accounts.get(account_id, {})
+        old_nickname = acc_info.get("nickname", "未知")
+
         new_nickname, ok = ModernInputDialog.get_text(
-            self, "重命名账号",
-            f"当前昵称: {old_nickname}\n\n请输入新昵称：",
-            old_nickname
+            self,
+            "重命名账号",
+            f"当前昵称: {old_nickname}\n请输入新的账号备注昵称：",
+            old_nickname,
         )
-        
         if ok and new_nickname and new_nickname != old_nickname:
-            self.switcher.accounts[account_id]['nickname'] = new_nickname
-            self.switcher._save_accounts()
+            saved_ok, res = self.switcher.rename_account_checked(account_id, new_nickname)
             self.refresh_accounts()
-            ModernDialog.show_success(self, "成功", f"账号已重命名为【{new_nickname}】")
-    
-    def toggle_version(self, account_id):
-        """切换账号的版本标记（国服/国际服）"""
+            if saved_ok:
+                ModernDialog.show_success(self, "成功", f"账号已重命名为【{res}】")
+            else:
+                ModernDialog.show_error(self, "重命名失败", res)
+
+    def toggle_version(self, account_id: str):
         acc_info = self.switcher.accounts.get(account_id, {})
-        nickname = acc_info.get('nickname', '未知')
-        current_version = acc_info.get('version', 'cn')
-        
-        if current_version == 'cn':
-            new_version = 'global'
-            new_version_text = '国际服'
-        else:
-            new_version = 'cn'
-            new_version_text = '国服'
-        
-        self.switcher.accounts[account_id]['version'] = new_version
-        self.switcher._save_accounts()
+        nickname = acc_info.get("nickname", "未知")
+
+        saved_ok, res = self.switcher.toggle_version_checked(account_id)
         self.refresh_accounts()
-        ModernDialog.show_success(self, "成功", f"账号【{nickname}】已标记为{new_version_text}")
-    
-    def update_account_data(self, account_id):
-        """更新账号数据（从当前战网状态覆盖保存的数据）"""
-        acc_info = self.switcher.accounts.get(account_id, {})
-        nickname = acc_info.get('nickname', '未知')
-        
-        if not self.switcher.is_battlenet_running():
-            ModernDialog.show_info(self, "提示", "请先启动战网并登录该账号")
-            return
-        
-        reply = ModernDialog.show_question(
-            self, "更新账号数据",
-            f"确定要用当前战网的登录状态覆盖账号【{nickname}】的数据吗？\n\n"
-            "⚠️ 请确保当前战网已登录的是该账号"
-        )
-        if reply:
-            self.switcher.update_account_data(account_id)
-            self.switcher.mark_logged_in(account_id)
-            self.switcher._save_accounts()
-            self.refresh_accounts()
-            ModernDialog.show_success(self, "成功", f"账号【{nickname}】数据已更新")
-    
-    def delete_account(self, account_id):
-        acc_info = self.switcher.accounts.get(account_id, {})
-        nickname = acc_info.get('nickname', '未知')
-        
-        reply = ModernDialog.show_question(
-            self, "确认删除",
-            f"确定要删除账号【{nickname}】吗？\n\n这将删除该账号的所有数据"
-        )
-        if reply:
-            self.switcher.delete_account(account_id)
-            self.refresh_accounts()
-    
-    def start_battlenet(self):
-        if self.switcher.start_battlenet():
-            pass  # 静默成功
+        if saved_ok:
+            new_version_text = "国际服" if res == "global" else "国服"
+            ModernDialog.show_success(self, "区服标记已更新", f"账号【{nickname}】已标记为 {new_version_text}")
         else:
-            ModernDialog.show_error(self, "错误", "启动战网失败")
-    
+            ModernDialog.show_error(self, "修改失败", res)
+
+    def update_account_data(self, account_id: str):
+        acc_info = self.switcher.accounts.get(account_id, {})
+        nickname = acc_info.get("nickname", "未知")
+
+        if not self.switcher.is_battlenet_client_open():
+            ModernDialog.show_info(self, "提示", "请先启动战网并登录该账号后再执行更新")
+            return
+
+        logout_warn = (
+            "⚠️ 检测到战网近期日志包含退出登录记录，请先确认客户端当前已进入主界面（而非处于退出登录页），以免用退出态覆盖备份！\n\n"
+            if self.switcher.has_recent_logout_signal()
+            else ""
+        )
+
+        reply = ModernDialog.show_question(
+            self,
+            "更新账号备份",
+            f"{logout_warn}"
+            f"确定要用当前战网的登录状态覆盖账号【{nickname}】的备份吗？\n\n"
+            "⚠️ 请确认当前战网正在登录的就是该账号。",
+        )
+        if not reply:
+            return
+
+        def _done(res):
+            ok, msg = res
+            self.refresh_accounts()
+            if ok:
+                ModernDialog.show_success(self, "更新成功", f"账号【{nickname}】数据已更新")
+            else:
+                ModernDialog.show_error(self, "更新失败", f"{msg}\n\n调试日志目录: {LOGS_DIR}")
+
+        self._run_background_task(f"正在更新【{nickname}】备份...", self.switcher.update_account_data, _done, account_id)
+
+    def delete_account(self, account_id: str):
+        acc_info = self.switcher.accounts.get(account_id, {})
+        nickname = acc_info.get("nickname", "未知")
+
+        reply = ModernDialog.show_question(
+            self,
+            "确认删除",
+            f"确定要删除账号【{nickname}】吗？\n\n这将永久删除该账号保存的本地隔离备份数据。",
+        )
+        if not reply:
+            return
+
+        def _done(res):
+            ok, msg = res
+            self.refresh_accounts()
+            if not ok:
+                ModernDialog.show_error(self, "删除失败", msg)
+            elif "下次启动时" in str(msg):
+                ModernDialog.show_info(self, "已移除", msg)
+
+        self._run_background_task(f"正在删除【{nickname}】...", self.switcher.delete_account_checked, _done, account_id)
+
+    def start_battlenet(self):
+        if not self.switcher.start_battlenet():
+            ModernDialog.show_error(self, "启动失败", "未找到战网启动程序，请在【⚙️ 设置】中检查或指定 Battle.net Launcher.exe 路径。")
+
     def close_battlenet(self):
-        self.switcher.close_battlenet()
-    
+        def _task():
+            if not self.switcher.is_battlenet_running():
+                return "not_running", ""
+            ok, msg, _ = self.switcher.close_battlenet_checked()
+            return ("closed" if ok else "failed"), msg
+
+        def _done(res):
+            state, msg = res
+            if state == "not_running":
+                ModernDialog.show_info(self, "提示", "当前未检测到正在运行的战网进程。")
+            elif state == "closed":
+                ModernDialog.show_info(self, "已关闭", "战网及相关启动器进程已关闭。")
+            else:
+                ModernDialog.show_error(self, "关闭失败", msg)
+
+        self._run_background_task("正在关闭战网进程...", _task, _done)
+
     def open_settings(self):
-        """打开设置对话框"""
         dialog = SettingsDialog(self, self.settings)
         if dialog.exec_() == QDialog.Accepted:
+            old_settings = self.settings.copy()
             self.settings = dialog.get_settings()
-            self.apply_settings()
-            self.save_settings()
-            self.refresh_accounts()  # 刷新以应用隐藏邮箱设置
-            ModernDialog.show_success(self, "成功", "设置已保存")
+            ok, err = self.save_settings()
+            if ok:
+                self.apply_settings()
+                self.refresh_accounts()
+                ModernDialog.show_success(self, "成功", "设置已保存")
+            else:
+                self.settings = old_settings
+                ModernDialog.show_error(self, "保存设置失败", f"无法写入设置文件：\n{err}")
+
+
+def relaunch_as_admin() -> bool:
+    """按需安全提权重启（使用绝对脚本路径，防止父目录启动时重复拼接相对路径）"""
+    try:
+        if getattr(sys, "frozen", False):
+            cmd_args = sys.argv[1:]
+        else:
+            cmd_args = [os.path.abspath(__file__)] + sys.argv[1:]
+        params = subprocess.list2cmdline(cmd_args) if cmd_args else None
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, params, APP_DIR, 1
+        )
+        return int(ret) > 32
+    except Exception:
+        return False
 
 
 def main():
-    # 请求管理员权限
-    if not is_admin():
-        try:
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable, " ".join(sys.argv), None, 1)
-            sys.exit(0)
-        except:
-            pass
-    
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_TITLE)
     app.setFont(QFont("微软雅黑", 10))
-    
+
+    instance_lock = SingleInstanceLock()
+    if not instance_lock.acquire():
+        ModernDialog.show_warning(
+            None,
+            "程序已在运行",
+            f"{APP_TITLE} 已有一个实例正在运行中。\n为防止并发读写损坏战网会话备份，请勿同时开启多个实例。",
+        )
+        sys.exit(1)
+
+    app.aboutToQuit.connect(instance_lock.release)
+
     window = ModernGUI()
     window.show()
-    
-    sys.exit(app.exec_())
+
+    exit_code = app.exec_()
+    instance_lock.release()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

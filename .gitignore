@@ -1,12 +1,13 @@
-# Python
+# Python bytecode & packaging
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 build/
-develop-eggs/
 dist/
+release/
+develop-eggs/
 downloads/
 eggs/
 .eggs/
@@ -22,7 +23,8 @@ wheels/
 
 # Virtual environments
 .env
-.venv
+.venv/
+.venv*/
 env/
 venv/
 ENV/
@@ -37,21 +39,20 @@ ENV/
 *.swp
 *.swo
 
-# Data files (用户数据不上传)
+# User account data & local configs (严禁上传用户本地会话与注册表备份)
 data/
+settings.json
 *.db
+*.reg
+*.lock
 
 # Logs
 *.log
+*.log.*
 Logs/
 
-# Windows
+# Windows & archives
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-
-# Batch files
-*.bat
-
-# Archives
 *.zip
