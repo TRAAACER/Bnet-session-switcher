@@ -37,7 +37,9 @@ from config import (
     APP_TITLE,
     APP_VERSION,
     LOGS_DIR,
+    PROJECT_REPO,
     SETTINGS_FILE,
+    UPSTREAM_REPO,
     SingleInstanceLock,
 )
 from isolated_switcher import IsolatedSwitcher, find_battlenet_exe, is_admin
@@ -664,6 +666,33 @@ class SettingsDialog(BaseFramelessDialog):
             """
         )
         self.body_layout.addWidget(self.hide_email_checkbox)
+
+        about_frame = QFrame()
+        about_frame.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: {COLORS['bg']};
+                border-radius: 8px;
+                border: 1px solid {COLORS['border']};
+            }}
+            """
+        )
+        about_layout = QVBoxLayout(about_frame)
+        about_layout.setContentsMargins(12, 10, 12, 10)
+        about_layout.setSpacing(4)
+
+        about_label = QLabel(
+            f'<div style="line-height:1.5;">'
+            f'<b>项目开源地址：</b><a href="{PROJECT_REPO}" style="color:{COLORS["primary_dark"]};">{PROJECT_REPO}</a><br/>'
+            f'<span style="color:{COLORS["text_light"]}; font-size:11px;">'
+            f'当前版本 v{APP_VERSION} · 基于 <a href="{UPSTREAM_REPO}" style="color:{COLORS["text_light"]};">54006/cnbxqhdl</a> 修复与优化'
+            f'</span></div>'
+        )
+        about_label.setOpenExternalLinks(True)
+        about_label.setTextInteractionFlags(Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse)
+        about_label.setWordWrap(True)
+        about_layout.addWidget(about_label)
+        self.body_layout.addWidget(about_frame)
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -1449,9 +1478,19 @@ class ModernGUI(QMainWindow):
         priv_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(priv_label)
 
-        footer = QLabel(f"源码 MIT · 发行包遵循 GPLv3\n{APP_NAME} v{APP_VERSION}\nBased on 54006/cnbxqhdl")
+        footer = QLabel(
+            f'<div style="line-height:1.45;">'
+            f'<a href="{PROJECT_REPO}" style="color:{COLORS["primary_dark"]}; text-decoration:none; font-weight:bold;">'
+            f'🔗 GitHub 项目主页</a><br/>'
+            f'<span>TRAAACER/Bnet-session-switcher</span><br/>'
+            f'<span>v{APP_VERSION} · 基于 54006/cnbxqhdl 优化</span>'
+            f'</div>'
+        )
         footer.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 10px;")
         footer.setAlignment(Qt.AlignCenter)
+        footer.setOpenExternalLinks(True)
+        footer.setCursor(Qt.PointingHandCursor)
+        footer.setToolTip(f"点击打开项目主页：{PROJECT_REPO}")
         footer.setWordWrap(True)
         layout.addWidget(footer)
 

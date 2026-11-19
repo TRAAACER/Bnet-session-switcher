@@ -11,6 +11,7 @@ import uuid
 APP_NAME = "bnet-session-switcher"
 APP_TITLE = "战网会话切换器"
 APP_VERSION = "1.2.2"
+PROJECT_REPO = "https://github.com/TRAAACER/Bnet-session-switcher"
 UPSTREAM_REPO = "https://github.com/54006/cnbxqhdl"
 
 

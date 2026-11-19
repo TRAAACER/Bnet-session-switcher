@@ -71,8 +71,8 @@ if not exist ".venv-build\Scripts\python.exe" (
 set "VPY=%CD%\.venv-build\Scripts\python.exe"
 
 echo [3/6] Installing locked build dependencies...
-if exist "requirements-build.lock.txt" (
-    "%VPY%" -m pip install -r requirements-build.lock.txt >> "%LOG%" 2>&1
+if exist "packaging\requirements-build.lock.txt" (
+    "%VPY%" -m pip install -r "packaging\requirements-build.lock.txt" >> "%LOG%" 2>&1
 ) else (
     "%VPY%" -m pip install -r requirements.txt pyinstaller >> "%LOG%" 2>&1
 )
@@ -82,6 +82,11 @@ echo [4/6] Cleaning temporary build files [preserving dist\data]...
 if exist "build" rmdir /s /q "build" 2>nul
 del /q "*.spec" 2>nul
 if exist "dist\bnet-session-switcher.exe" del /f /q "dist\bnet-session-switcher.exe" 2>nul
+if exist "dist\bnet-session-switcher.exe" (
+    echo ERROR: dist\bnet-session-switcher.exe is currently running. Please close it first.
+    echo ERROR: dist\bnet-session-switcher.exe locked by running process. >> "%LOG%"
+    goto fail
+)
 
 echo [5/6] Building dist\bnet-session-switcher.exe with PyInstaller...
 set "ICON_ARGS="
@@ -95,7 +100,7 @@ if exist "icon.ico" (
 if errorlevel 1 goto fail
 
 echo [6/6] Staging and auditing clean release bundle...
-"%VPY%" stage_release.py >> "%LOG%" 2>&1
+"%VPY%" "packaging\stage_release.py" >> "%LOG%" 2>&1
 if errorlevel 1 goto fail
 
 echo.

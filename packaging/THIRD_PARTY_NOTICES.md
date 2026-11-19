@@ -2,7 +2,7 @@
 
 ## 1. Project Own Source Code (MIT License)
 
-The source code authored in this repository (`config.py`, `isolated_switcher.py`, `modern_gui.py`, `stage_release.py`, `build.bat`, and documentation) is licensed under the **MIT License** (see [LICENSE](./LICENSE)), preserving upstream attribution to [54006/cnbxqhdl](https://github.com/54006/cnbxqhdl).
+The source code in [TRAAACER/Bnet-session-switcher](https://github.com/TRAAACER/Bnet-session-switcher) (`config.py`, `isolated_switcher.py`, `modern_gui.py`, `packaging/stage_release.py`, `build.bat`, and documentation) is licensed under the **MIT License** (see [LICENSE](../LICENSE)), preserving upstream attribution to [54006/cnbxqhdl](https://github.com/54006/cnbxqhdl).
 
 ---
 
