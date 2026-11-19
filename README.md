@@ -42,6 +42,7 @@ python modern_gui.py
 
 ## 🙏 致谢与说明
 
+- **问题反馈**：如遇严重 Bug 或异常，欢迎前往 **[Issues 页面](https://github.com/TRAAACER/Bnet-session-switcher/issues)** 提交反馈（可附带 `data\logs\` 下已自动脱敏的日志；**切勿上传** `data\isolated_accounts\` 或 `.reg` 文件，以免泄露个人登录态）。
 - **致谢**：感谢原作者 [54006/cnbxqhdl](https://github.com/54006/cnbxqhdl) 的开源分享；本项目在原版基础上的问题修复、架构加固与审查优化工作由 **Gemini 4 Carbon** 和 **ChatGPT 6 Astra PRO** 共同完成。
 - **免责声明**：本工具仅供个人多账号日常管理使用，使用风险由使用者自行承担。
 - **开源协议**：本仓库源码采用 [MIT License](./LICENSE) 开源；预编译发行包因包含开源版 `PyQt5`，整体遵循 GNU GPL v3.0 分发（详见 [packaging/THIRD_PARTY_NOTICES.md](./packaging/THIRD_PARTY_NOTICES.md)）。
